@@ -1,0 +1,36 @@
+[project]
+name = "faceiq-pref"
+version = "0.1.0"
+description = "FaceIQ preference model: Bradley-Terry GT refit + pairwise neural comparator"
+requires-python = ">=3.11"
+dependencies = [
+    "numpy>=1.26",
+    "pandas>=2.2",
+    "scipy>=1.13",
+    "choix>=0.3.5",
+    "torch>=2.3",
+    "torchvision>=0.18",
+    "pillow>=10.3",
+    "pyyaml>=6.0",
+    "tqdm>=4.66",
+    "streamlit>=1.36",
+    "plotly>=5.22",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.2",
+    "ruff>=0.5",
+    "ipykernel>=6.29",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"

@@ -1,0 +1,26 @@
+# Data, weights, artifacts — never commit (photos + exports are sensitive)
+data/
+checkpoints/
+artifacts/
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+
+# Model weights
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+
+# Notebooks: keep source, ignore checkpoints
+.ipynb_checkpoints/
+
+# OS / editor
+.DS_Store
+.idea/

@@ -1,0 +1,22 @@
+# Preference comparator v1 — baseline config
+# Run: python scripts/train.py --config configs/train-v1.yaml
+
+export_dir: data/exports/cmr1mr0m7000196d57zi3vcgn
+run_name: train-v1
+
+backbone: resnet18          # resnet18 | resnet50
+image_size: 224
+batch_size: 64
+epochs: 10
+lr: 0.0001
+weight_decay: 0.0001
+
+val_fraction: 0.2           # split by FACE id, never by pair
+split_seed: 42
+num_workers: 4
+skip_ties: true             # v1: drop ties; log count
+augment: true               # horizontal flip only (presentation already randomized)
+
+# For a quick smoke test on CPU/MPS set e.g.:
+# max_pairs: 2000
+# epochs: 1
