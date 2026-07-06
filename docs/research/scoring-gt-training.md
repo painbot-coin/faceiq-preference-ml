@@ -144,16 +144,16 @@ Target split: ~80% train / ~20% val matchups by face id.
 
 - [x] Labeling complete — run `cmr1mr0m7000196d57zi3vcgn`, 52,500 VLM labels, `pairwise-v3-gt`
 - [x] Human audit gate — 750-pair sample, 84.9% accuracy, 86 export exclusions
-- [ ] **Export full run to disk** — paginate `GET /api/admin/pairwise/runs/cmr1mr0m7000196d57zi3vcgn/export?promptVersion=pairwise-v3-gt&offset=&limit=2000` until `total` exhausted; save under `~/research-data/scoring-gt/artifacts/gt-full-export/`
+- [x] **Export full run to disk** — done 2026-07-04 via `faceiq-labs/scripts/export-gt-run.ts` (idempotent, resumable) → `faceiq-preference-ml/data/exports/cmr1mr0m7000196d57zi3vcgn/` (manifest + 6 JSONL shards + 3,000 images, sha256-verified)
 
 **ML repo (`faceiq-preference-ml` — create if missing):**
 
-- [ ] Scaffold repo (`pyproject.toml`, `src/dataset.py`, `src/bt_refit.py`, `src/train.py`)
-- [ ] Copy export JSON + symlink or copy face images to `data/exports/`
-- [ ] Implement **finalize label** helper: human winner if audited, else VLM winner
-- [ ] **BT refit** + stability check (80% subsample Spearman ρ > 0.95)
-- [ ] **Calibration** — percentile → `/10` (core §12 anchor table)
-- [ ] **Validate** — Spearman ρ vs Labs `overall_score` (log §5.2)
+- [x] Scaffold repo (`pyproject.toml`, `src/faceiq_pref/{data,bt,calibrate,validate,model,train,eval}.py`)
+- [x] Copy export JSON + symlink or copy face images to `data/exports/`
+- [x] Implement **finalize label** helper: human winner if audited, else VLM winner (`data.py` re-derives and asserts vs exporter)
+- [x] **BT refit** + stability check (80% subsample Spearman ρ > 0.95) — `bt-refit-v1`, all gates passed (log §5.1)
+- [x] **Calibration** — percentile → `/10` (core §12 anchor table) — log §5.2
+- [x] **Validate** — Spearman ρ vs Labs `overall_score` (log §5.2) — 0.745 F / 0.752 M
 - [ ] Smoke train locally (CPU/MPS) on subset
 - [ ] Full train on GPU; save checkpoint — log §5.3
 - [ ] Primary evaluation on held-out human ratings (§6)
@@ -162,6 +162,7 @@ Target split: ~80% train / ~20% val matchups by face id.
 
 - [ ] Prisma §3.3 BT rating tables + admin dashboard
 - [ ] Apply human overrides to all 1,032 labeled rows in export finalize script (already in export JSON)
+- [ ] **Production anchor panel** — manually assigned `/10` ladder and/or v2 cohort with thinner decile tails (research log §5.2 elite crowding, §5.4 Path A/B)
 
 ---
 

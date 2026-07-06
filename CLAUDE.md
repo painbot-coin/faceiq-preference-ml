@@ -59,7 +59,7 @@ they match. Training and BT must consume `finalOutcome` only.
 source .venv/bin/activate
 python scripts/run_bt.py --export data/exports/cmr1mr0m7000196d57zi3vcgn   # BT + calibration
 python scripts/train.py --config configs/train-v1.yaml                     # train comparator
-streamlit run app/dashboard.py                                             # results UI
+streamlit run app/dashboard.py --server.port 8502                                            # results UI
 pytest                                                                     # tests
 ```
 

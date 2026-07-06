@@ -748,7 +748,29 @@ Bradley–Terry turns ~52k pairwise outcomes into a **relative strength θ** per
 
 **Fit:** custom regularized MM algorithm (Hunter 2004; α=0.01 virtual games) in `faceiq-preference-ml/src/faceiq_pref/bt.py`. **Male and female fitted separately** (same-gender queue → cross-gender graph disconnected by construction). Faces with **< 15** resolved comparisons are dropped pre-fit (iteratively) rather than scored on thin evidence.
 
-**Stability gate (core §14):** Refit twice on independent 80% subsamples of pairs → Spearman ρ between rank lists **> 0.95**. Also: graph connectivity, no face with < 15 resolved comparisons.
+**Model & estimation (formal).** Each face $i$ carries a latent strength $p_i > 0$; reported scores are $\theta_i = \log p_i$. The Bradley–Terry model puts
+
+$$
+\Pr(i \succ j) \;=\; \frac{p_i}{p_i + p_j}.
+$$
+
+Let $w_{ij}$ be the weighted win count of $i$ over $j$ (1 per decisive win; a tie contributes $\tfrac{1}{2}$ to each direction) and $n_{ij} = w_{ij} + w_{ji}$ the total games between $i$ and $j$. The log-likelihood is
+
+$$
+\ell(\mathbf{p}) \;=\; \sum_{i \neq j} w_{ij} \bigl[ \log p_i - \log (p_i + p_j) \bigr],
+$$
+
+maximized by the MM (minorize–maximize) fixed-point iteration of Hunter (2004), augmented with $\alpha$ virtual wins and $\alpha$ virtual losses against a pseudo-opponent of fixed strength $1$:
+
+$$
+p_i^{(t+1)} \;=\; \frac{W_i + \alpha}{\dfrac{2\alpha}{p_i^{(t)} + 1} \;+\; \displaystyle\sum_{j \neq i} \frac{n_{ij}}{p_i^{(t)} + p_j^{(t)}}},
+\qquad W_i = \sum_{j \neq i} w_{ij},
+\qquad \alpha = 0.01 .
+$$
+
+The regularization keeps the MLE finite for undefeated faces (unregularized, $\hat{p}_i \to \infty$). Each MM step provably does not decrease $\ell$. Strengths are identifiable only up to scale, so each iterate is renormalized to geometric mean $1$ (equivalently $\sum_i \theta_i = 0$); convergence is declared when $\max_i \lvert \theta_i^{(t+1)} - \theta_i^{(t)} \rvert < 10^{-6}$.
+
+**Stability gate (core §14):** Refit twice on independent Bernoulli(0.8) subsamples of pairs → Spearman ρ between the resulting θ rank lists **> 0.95**. Also: graph connectivity, no face with < 15 resolved comparisons.
 
 #### Success criteria
 
@@ -772,6 +794,8 @@ The single dropped female face is the **poison face** `cmqxa1yun0lhe7hdpzb92acyj
 
 Moderate ρ ≈ 0.75 vs Labs is the healthy regime: correlated with the legacy formula but not reproducing it.
 
+**Independent cross-check (2026-07-04):** refitting the same edges with `choix.ilsr_pairwise` (ILSR, a different BT estimator) reproduces the shipped ranking at Spearman ρ = **0.9995** (female) / **0.9994** (male). The two libraries' regularization parameters are not comparable (choix's `alpha=0.01` shrinks far harder than our virtual-game α=0.01; near-zero values recover the common MLE), and choix cannot weight tie edges — refitting our MM on the same tie-dropped edges matches the shipped refit at ρ = 0.99997, confirming tie handling is immaterial. Notebook: `faceiq-preference-ml/notebooks/explore.ipynb`.
+
 #### Decision
 
 **Go** — BT ranking accepted as GT v1 (2,999 faces). Calibrated /10 scores written alongside θ. Next: preference comparator training (§5.3); optionally re-run with `--confidence high` as an ablation.
@@ -787,15 +811,105 @@ Moderate ρ ≈ 0.75 vs Labs is the healthy regime: correlated with the legacy f
 
 ### 5.2 Calibration & validation vs Labs overall_score
 
-**Status:** Not started.
+**Status:** **Complete** (2026-07-04 — ran as part of `bt-refit-v1` inside `scripts/run_bt.py`).
 
 #### Methodology
 
-<!-- Pre-registered anchor points; map rank → scoreOutOf10. -->
+BT strengths $\theta$ have an arbitrary scale — only their order is meaningful — so the `/10` score is defined through the **percentile rank**, mapped onto the **pre-registered anchor curve** (core §12, locked before any results were seen).
+
+**Percentile rank.** Within each gender, for face $i$ among $n$ scored faces:
+
+$$
+r_i \;=\; \frac{\operatorname{rank}(\theta_i) - 1}{n - 1} \;\in\; [0, 1],
+$$
+
+where $\operatorname{rank}$ is ascending (1 = weakest).
+
+**Score curve.** $s_i = f(r_i)$, with $f$ the monotone PCHIP (piecewise-cubic Hermite) interpolant through the pre-registered anchors, clipped to $[0, 10]$:
+
+| Percentile $r$ | 0.0 | 0.10 | 0.50 | 0.90 | 0.99 | 0.999 | 1.0 |
+|---|---|---|---|---|---|---|---|
+| Score $f(r)$ | 1.0 | 3.0 | 5.0 | 7.0 | 8.0 | 8.5 | 9.0 |
+
+Monotonicity of PCHIP guarantees the score preserves the BT order exactly. The right tail compresses deliberately: with ~1,500 faces per gender the single best face sits at roughly the top $0.07$ percentile, so the sample cannot resolve rarer tails (a 1-in-100k face); capping at 9.0 avoids extrapolating beyond the data. Implementation: `faceiq-preference-ml/src/faceiq_pref/calibrate.py`.
+
+**Validation vs Labs.** Spearman ρ between $\theta$ and the legacy Labs `overall_score` per gender (`src/faceiq_pref/validate.py`) — a sanity check, never a training target: ρ ≈ 1 would mean the GT merely reproduced the formula being replaced; ρ ≈ 0 would indicate a defect.
 
 #### Results
 
-<!-- Spearman ρ vs Labs overallScore; tail behavior. -->
+- Calibrated `scoreOutOf10` written for all 2,999 scored faces alongside θ and percentile in `artifacts/bt-refit-v1/ratings.csv`; median = 5.0 and max = 9.0 per gender by construction.
+- **Spearman ρ vs Labs `overall_score`: 0.745 (female, n=1,499) / 0.752 (male, n=1,500)** — the intended moderate regime (correlated with, but not duplicating, the legacy formula). Computed over **all scored faces** (not a subsample; the 80% subsample protocol is the §5.1 stability gate only).
+
+#### Extended BT-vs-Labs analytics (2026-07-04, full population)
+
+Rank agreement, score-scale agreement, and localization of disagreement — all faces, per gender:
+
+| Metric | Female (n=1,499) | Male (n=1,500) |
+|---|---|---|
+| Spearman ρ (rank) | 0.745 | 0.752 |
+| Kendall τ (rank) | 0.561 | 0.566 |
+| Pearson r (`scoreOutOf10` vs Labs) | 0.742 | 0.754 |
+| Labs score mean ± std | 6.31 ± 1.10 | 6.13 ± 1.14 |
+| BT `/10` mean ± std | 4.98 ± 1.54 | 4.98 ± 1.54 |
+| Mean signed diff (BT − Labs) | −1.33 | −1.15 |
+| Median absolute rank displacement | 158 / 1,499 | 152 / 1,500 |
+| p90 absolute rank displacement | 530 | 532 |
+| Top-50 set overlap | 36% | 48% |
+| Top-150 set overlap | 59% | 70% |
+| Bottom-150 set overlap | 49% | 45% |
+| Decile-bin agreement (exact / ±1) | 27.5% / 61.4% | 29.7% / 61.1% |
+
+Within-decile Spearman (θ vs Labs, inside each Labs decile): ~0.24–0.41 at the extremes (D1–D2, D9–D10) but **~0.0–0.15 across the middle (D4–D7)**.
+
+**Interpretation:**
+
+- Pearson on calibrated scores ≈ Spearman on ranks (both ~0.75), so rank-level and score-level agreement tell the same story; the calibrated score is a monotone function of rank, and both scales are roughly linearly related.
+- The absolute offset (Labs mean 6.1–6.3 vs BT median 5.0) is **by construction, not a finding**: the pre-registered curve pins the median face at 5.0, while the legacy formula is inflated (its median sits above 6). Absolute BT−Labs differences are therefore not meaningful; only order comparisons are.
+- Agreement is concentrated at the **tails**: the two systems largely concur on who is clearly high or low (D1–D2, D9–D10 within-decile ρ up to 0.41; top-150 overlap 59–70%), but are **near-uncorrelated inside the middle deciles** — the fine ordering of average faces is where the pairwise GT diverges most from the formula, and where it plausibly adds the most new information (middle deciles are also where per-pair label noise is highest, per the §4.3 audit).
+- Top-50 overlap of 36–48% means the very top of the hierarchy is substantially re-ranked, not just reshuffled by noise — median displacement is ~155 rank positions (~10% of the list), p90 ~530.
+
+These are descriptive diagnostics, not gates; no action required. Script inline in session notes; numbers reproducible from `ratings.csv` alone.
+
+#### Elite crowding — cohort design concern (2026-07-05)
+
+**Observation:** Top-decile faces (celebrities, professional models) often read **~7.3–7.5 /10** despite Labs scores of 8+ and high win rates (e.g. ~86% in 35 matchups). Dashboard review flagged Sean O'Pry–tier and Taylor Hill–tier faces in the **~95th percentile** band, not the 99th+ band where scores reach 8.0+.
+
+**Mechanism (not a BT bug):** Two stacked effects:
+
+1. **Cohort-relative ranking.** BT θ and percentile are computed **within this 3k sample**. ~22% of each gender sits in Labs deciles 9–10 (~330 faces); ~186 males are decile-10 alone. Elites compete mostly against other elites (~35 same-gender matchups each), so even an 85%+ win rate can land at only the ~95th percentile when 70+ faces rank higher. In a general-population sample with few elites, the same face would sweep most matchups and sit at 99th+ percentile.
+2. **Calibration maps percentile → /10**, not absolute world attractiveness. Pre-registered anchors pin 90th → 7.0, 99th → 8.0, so 95th → ~7.4 **by construction**. The `/10` is a display label on cohort rank, not a claim about "deserves 8+ globally."
+
+**Impact on comparator training:** **Low risk for the training objective.** The neural model learns **pairwise winners only** — it never sees `/10`. It learns *relative taste* ("this elite face beats that elite face"), which is valuable GT signal. A low displayed `/10` on a celebrity does **not** teach the model "this person is a 7.5"; it only reflects where that face sits in **this** crowded elite pool. Matchup accuracy and θ ordering are what matter for training and for rank-agreement evaluation (Kendall τ vs BT).
+
+**Impact on production `/10`:** **Real concern if research-cohort `/10` is shipped directly to users.** Production absolute scores should come from **reference-set inference** (§5.4): compare the new face against an anchor panel with **product-facing** known `/10` values, then aggregate implied scores. The comparator supplies relative judgments; anchors supply the absolute scale.
+
+**Future data gathering (recommended):**
+
+| Issue | Current v1 cohort | Suggested v2+ |
+|-------|---------------------|---------------|
+| Tail density | ~22% in deciles 9–10 per gender (stratified for balance) | **Thinner tails** — fewer faces at the top (and bottom) deciles; avoid near-uniform decile fill |
+| Elite block | Many professional / hyper-attractive faces in one pool | **Manual curation** — cap elite count; separate "elite ladder" subset if fine top-end ordering is needed |
+| Sampling goal | Learn preference across full decile range | Match sampling to **production population** (mostly average users), with a small held-out elite ladder for top-end calibration |
+
+**Recalibration stopgap (e.g. map 95th → 8.0):** **Not pursued for v1.** Arbitrary without a production anchor policy; does not affect training; ranking θ unchanged. Acceptable to defer until a deliberate anchor ladder or v2 cohort exists. The `cap95` variant (max 9.5 only) remains an optional display CSV; v1 pre-registered curve stays canonical for the paper.
+
+**What actually matters for v1 → production:**
+
+1. **Matchup label quality** (~85% VLM agreement; human overrides where audited) — primary training signal.
+2. **BT θ ranking** — authoritative relative GT; stability gates passed.
+3. **Production anchor panel** — manually curated and/or BT-fitted on a **production-representative** cohort; anchors may assign known `/10` (e.g. a reference face fixed at 8.5) independent of where that face percentile-sits in the research export.
+
+#### Decision
+
+- Calibration accepted as pre-registered; **no post-hoc anchor adjustments** to the canonical v1 curve.
+- **Amendment (2026-07-05) — `cap95` display variant.** A second, explicitly-labeled anchor set was added with the max anchor raised 9.0 → 9.5 (all other anchors identical). Rationale: the cohort includes professional top-model faces, so the sample maximum plausibly represents a rarer tail than 1-in-3,000. Effects verified: **ranking and θ byte-identical**; only 22 / 2,999 faces change score by > 0.005 (all above the ~99.6th percentile); median stays 5.0. Produced by `scripts/recalibrate.py --refit artifacts/bt-refit-v1 --anchors cap95` → `artifacts/bt-refit-v1-cap95/` (no BT refit involved; fully revertible by preferring the v1 CSV). v1 remains the pre-registered curve of record for the paper; cap95 is the product-facing display variant.
+- **Persistence:** refit and training results remain **filesystem-versioned in the ML repo** (`artifacts/bt-refit-vN/`, `artifacts/train-vN/`) and are browsed via the Streamlit dashboard. No local database. Persisting into the labs DB (schema §3.3 `VlmPilotBtRefit` / `VlmPilotFaceRating`) is **deferred** to a future one-shot `faceiq-labs/scripts/import-bt-refit.ts` that reads `ratings.csv` + `metrics.json`, run once per *accepted* refit — the ML repo itself never touches the DB.
+
+#### Artifacts
+
+- `faceiq-preference-ml/artifacts/bt-refit-v1/{ratings.csv, metrics.json}` (anchors recorded in `metrics.json`)
+- Curve + validation code: `src/faceiq_pref/{calibrate.py, validate.py}`
+- Dashboard (calibration curve, BT-vs-Labs scatter, rankings with photos): `streamlit run app/dashboard.py --server.port 8502`
 
 ---
 
@@ -813,7 +927,20 @@ Moderate ρ ≈ 0.75 vs Labs is the healthy regime: correlated with the legacy f
 4. **Bradley–Terry refit (Python, §5.1)** — Separate statistical step on the **same pairwise win/loss edges**; outputs rank/score θᵢ per face. Not neural training.
 5. **Neural comparator (faceiq-preference-ml)** — Mini-batch gradient descent over **fixed exported pairs** (image A, image B, winner); many **epochs** over the same dataset. BT ranks used for evaluation and calibration to `/10`, not usually as the primary loss target.
 
-<!-- Architecture, train/val split by face id, hyperparameters. -->
+**Architecture justification (recorded 2026-07-04, pre-training):**
+
+- The comparator is a **single-input pairwise model** (a scalar scorer $s(\cdot)$ applied siamese-style; logit $= s(A) - s(B)$), not a pair-input model that ingests both images jointly. Single-input scoring guarantees **transitivity by construction** — real-valued scores cannot produce preference cycles (A ≻ B ≻ C ≻ A), which pair-input models can, and a coherent global ranking is exactly the product goal.
+- The loss (sigmoid over the score difference + binary cross-entropy on the winner) is the **RankNet** objective. RankNet's known limitation — it weights all pairwise inversions equally instead of prioritizing top-of-list accuracy (LambdaRank/nDCG-style) — is **acceptable and arguably preferable here**: the goal is a well-calibrated score across the whole face distribution, not a retrieval-style top-k list. LambdaRank considered and rejected on these grounds.
+- **Order-symmetry guard:** the two arms share weights exactly, and left/right presentation was randomized upstream at labeling; training should verify no positional bias (e.g. accuracy on A-wins vs B-wins pairs should match). This is the most common silent failure of this architecture.
+- Distance-metric siamese variants (contrastive/triplet loss) are a **different branch** of the siamese family aimed at verification/one-shot tasks; they do not apply to scalar-utility learning and are out of scope.
+
+**Training signal vs display scores (2026-07-05):**
+
+- **Training label:** matchup winner only (`finalOutcome`). No `/10`, no Labs `overall_score`.
+- **BT `/10` and θ:** evaluation, dashboard, and future anchor metadata — **not** the loss target.
+- **Elite crowding** (§5.2) compresses research-cohort `/10` at the top; training still benefits from elite-vs-elite pairwise structure. See §5.4 for how production `/10` is assigned via anchors, not research percentiles.
+
+<!-- Train/val split by face id, hyperparameters. -->
 
 #### Results
 
@@ -832,6 +959,28 @@ Moderate ρ ≈ 0.75 vs Labs is the healthy regime: correlated with the legacy f
 #### Methodology
 
 <!-- New face vs anchor set → /10 band. -->
+
+**Design notes for production inference (recorded 2026-07-04, before implementation):**
+
+In production the comparator scores a **new, unseen face** by comparing it against a **reference panel** of anchor faces with known `/10` scores — the comparator alone outputs only relative scores with no absolute scale. Literature guidance to apply when this is built (siamese-regression reference-set inference, PMC10469421):
+
+- **Panel size is not "more is better."** Reference-set inference degrades past a moderate panel size (~5–10 references in the source study) because dissimilar/distant references add bias, not signal. Choose panel size empirically on held-out cohort faces; do not default to "compare against everything."
+- **Panel composition:** anchors should span the score range (a ladder), e.g. faces at fixed product-facing percentiles per gender with high comparison counts — the `isAnchor` flag in schema §3.3 is reserved for exactly this.
+- **Cheap per-prediction uncertainty:** the variance of the predicted deltas across the panel is a confidence signal (high spread = unreliable prediction) — no ensemble needed. Log it alongside the point estimate.
+- **Two inference options to compare:** (a) average implied score across panel comparisons; (b) fit the new face's θ by mini-BT against the panel outcomes. Validate both against held-out BT θ before choosing.
+
+Note the asymmetry with training: training needs no reference panel (labels are fixed exported pairs); the panel exists only at deployment/inference time.
+
+**Anchor sourcing — two valid paths (2026-07-05, post elite-crowding review):**
+
+| Path | When to use | How |
+|------|-------------|-----|
+| **A. New curated cohort + BT** | Long-term; production-population-aligned GT | Smaller tails (§5.2); export → BT refit → `/10` from calibration; select ladder faces from stable θ percentiles |
+| **B. Manually assigned anchor panel** | Near-term product; decouple absolute scale from research cohort | Curate ~5–10 faces per gender; assign **product `/10`** by committee (e.g. reference model fixed at 8.5); store in DB (§3.3 `isAnchor`). Comparator predicts win/loss vs each anchor; aggregate to user `/10`. Research-cohort BT scores on those same photos are optional cross-check only |
+
+Path B is the intended **v1 production bridge**: the model learns *who beats whom* from 52k matchups; anchors define *what `/10` means* for users. Elite crowding in the research export does not block training; it only means **do not copy research `scoreOutOf10` verbatim into the consumer app** — use Path A or B for production labels.
+
+**Open for §5.4 implementation:** panel size sweep; gender-matched anchors; log variance-based confidence; smoke test on held-out cohort faces vs human `/10`.
 
 #### Results
 
@@ -942,8 +1091,8 @@ Moderate ρ ≈ 0.75 vs Labs is the healthy regime: correlated with the legacy f
 | **Pair queue generated** | §4.1 dry + full ✓ | — |
 | **Labeling started** | §4.2 full ✓ | — |
 | **Labeling complete** | §4.2 final + §4.3 ✓ | — |
-| **BT export ready** | §5.1 + §5.2 | **← now** |
-| **Model trained** | §5.3 summary | Failed runs unless informative |
+| **BT export ready** | §5.1 + §5.2 ✓ (2026-07-04) | — |
+| **Model trained** | §5.3 summary | Failed runs unless informative · **← now** |
 | **Deploy smoke test** | §5.4 | — |
 | **Primary evaluation** | **§6 in full** | — |
 | **Publication draft** | §1.2 updated with §6 answer | §8 scratch cleanup |

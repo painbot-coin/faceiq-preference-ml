@@ -8,12 +8,66 @@ from pathlib import Path
 import torch
 from PIL import Image
 from scipy.stats import kendalltau, spearmanr
+from torch.utils.data import DataLoader
 from torchvision import transforms
 from tqdm import tqdm
 
-from .data import Export, Face
-from .model import PreferenceScorer, pick_device
-from .train import IMAGENET_MEAN, IMAGENET_STD
+from .data import Export, Face, split_by_face_id
+from .model import PairwiseModel, PreferenceScorer, pick_device
+from .train import (
+    IMAGENET_MEAN,
+    IMAGENET_STD,
+    PairDataset,
+    TrainConfig,
+    _filter_rows,
+    evaluate,
+)
+
+
+def heldout_pairwise_accuracy(
+    checkpoint_path: str | Path,
+    export: Export,
+    batch_size: int | None = None,
+    num_workers: int | None = None,
+) -> dict:
+    """Held-out pairwise accuracy of a saved checkpoint.
+
+    Rebuilds the exact val split the run trained against (same val_fraction,
+    split seed, tie rule, and max_pairs stored in the checkpoint config), so the
+    number is comparable to the in-training `best_val_accuracy`.
+    """
+    device = pick_device()
+    ckpt = torch.load(checkpoint_path, map_location=device)
+    cfg = TrainConfig(**ckpt["config"])
+
+    model = PairwiseModel(cfg.backbone, pretrained=False).to(device)
+    model.load_state_dict(ckpt["model"])
+    model.eval()
+
+    faces = export.faces()
+    matchups = export.all_matchups()
+    if cfg.max_pairs:
+        matchups = matchups[: cfg.max_pairs]
+    _, val_rows = split_by_face_id(matchups, cfg.val_fraction, cfg.split_seed)
+    n_raw = len(val_rows)
+    val_rows = _filter_rows(val_rows, faces, export, cfg)
+
+    ds = PairDataset(val_rows, faces, export, cfg.image_size, augment=False)
+    dl = DataLoader(
+        ds,
+        batch_size or cfg.batch_size,
+        num_workers=cfg.num_workers if num_workers is None else num_workers,
+    )
+    metrics = evaluate(model, dl, device)
+    return {
+        "checkpoint": str(checkpoint_path),
+        "checkpoint_epoch": ckpt.get("epoch"),
+        "val_pairs_in_split": n_raw,
+        "val_pairs_scored": len(val_rows),
+        "skipped_ties_or_missing_images": n_raw - len(val_rows),
+        "val_loss": metrics["loss"],
+        "val_accuracy": metrics["accuracy"],
+    }
 
 
 @torch.no_grad()
