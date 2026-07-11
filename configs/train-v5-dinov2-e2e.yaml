@@ -1,0 +1,21 @@
+# Preference comparator v5 — DINOv2 end-to-end fine-tune (follow-up to v3 probe).
+# v3 frozen probe got 72.4%; fair test is unfreeze backbone with low lr for ViT.
+# Run AFTER v4 unless you want to skip straight to this (~4-5h on MPS).
+# Run: python scripts/train.py --config configs/train-v5-dinov2-e2e.yaml
+
+export_dir: data/exports/cmr1mr0m7000196d57zi3vcgn
+run_name: train-v5-dinov2-e2e
+
+backbone: dinov2_vits14
+freeze_backbone: false
+image_size: 224
+batch_size: 32              # smaller batch: ViT uses more memory than ResNet
+epochs: 8
+lr: 0.00005                 # lower lr for fine-tuning a ViT (vs 1e-4 for ResNet)
+weight_decay: 0.0001
+
+val_fraction: 0.2
+split_seed: 42
+num_workers: 4
+skip_ties: true
+augment: true

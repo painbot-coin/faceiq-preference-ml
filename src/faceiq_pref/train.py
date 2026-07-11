@@ -18,11 +18,27 @@ from torch.utils.data import DataLoader, Dataset
 from torchvision import transforms
 from tqdm import tqdm
 
+from .backbones.arcface import is_arcface_backbone
 from .data import Export, Face, Matchup, split_by_face_id
 from .model import PairwiseModel, pick_device
 
 IMAGENET_MEAN = [0.485, 0.456, 0.406]
 IMAGENET_STD = [0.229, 0.224, 0.225]
+# ArcFace w600k_r50: (pixel/255 - 0.5) / 0.5; backbone forward swaps RGB -> BGR.
+ARCface_MEAN = [0.5, 0.5, 0.5]
+ARCface_STD = [0.5, 0.5, 0.5]
+
+
+def build_transforms(backbone: str, image_size: int, augment: bool) -> transforms.Compose:
+    ops: list = [transforms.Resize((image_size, image_size))]
+    if augment:
+        ops.append(transforms.RandomHorizontalFlip())
+    ops.append(transforms.ToTensor())
+    if is_arcface_backbone(backbone):
+        ops.append(transforms.Normalize(ARCface_MEAN, ARCface_STD))
+    else:
+        ops.append(transforms.Normalize(IMAGENET_MEAN, IMAGENET_STD))
+    return transforms.Compose(ops)
 
 
 @dataclass
@@ -41,6 +57,7 @@ class TrainConfig:
     skip_ties: bool = True
     augment: bool = True
     max_pairs: int | None = None  # subsample for smoke tests
+    freeze_backbone: bool = False  # embedding probe: train only the head
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> "TrainConfig":
@@ -56,18 +73,14 @@ class PairDataset(Dataset):
         matchups: list[Matchup],
         faces: dict[str, Face],
         export: Export,
+        backbone: str,
         image_size: int,
         augment: bool,
     ):
         self.rows = matchups
         self.faces = faces
         self.export = export
-        ops: list = [transforms.Resize((image_size, image_size))]
-        if augment:
-            # Horizontal flip is safe: left/right presentation was randomized at labeling.
-            ops.append(transforms.RandomHorizontalFlip())
-        ops += [transforms.ToTensor(), transforms.Normalize(IMAGENET_MEAN, IMAGENET_STD)]
-        self.tf = transforms.Compose(ops)
+        self.tf = build_transforms(backbone, image_size, augment)
 
     def __len__(self) -> int:
         return len(self.rows)
@@ -120,15 +133,20 @@ def train(export: Export, cfg: TrainConfig) -> dict:
     train_rows = _filter_rows(train_rows, faces, export, cfg)
     val_rows = _filter_rows(val_rows, faces, export, cfg)
 
-    train_ds = PairDataset(train_rows, faces, export, cfg.image_size, cfg.augment)
-    val_ds = PairDataset(val_rows, faces, export, cfg.image_size, augment=False)
+    train_ds = PairDataset(train_rows, faces, export, cfg.backbone, cfg.image_size, cfg.augment)
+    val_ds = PairDataset(val_rows, faces, export, cfg.backbone, cfg.image_size, augment=False)
     train_dl = DataLoader(
         train_ds, cfg.batch_size, shuffle=True, num_workers=cfg.num_workers, pin_memory=True
     )
     val_dl = DataLoader(val_ds, cfg.batch_size, num_workers=cfg.num_workers, pin_memory=True)
 
     model = PairwiseModel(cfg.backbone).to(device)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
+    if cfg.freeze_backbone:
+        for p in model.scorer.backbone.parameters():
+            p.requires_grad = False
+        model.scorer.backbone.eval()
+    trainable = [p for p in model.parameters() if p.requires_grad]
+    optimizer = torch.optim.AdamW(trainable, lr=cfg.lr, weight_decay=cfg.weight_decay)
     criterion = nn.BCEWithLogitsLoss()
 
     ckpt_dir = Path("checkpoints") / cfg.run_name
@@ -139,6 +157,8 @@ def train(export: Export, cfg: TrainConfig) -> dict:
     history, best_acc = [], 0.0
     for epoch in range(1, cfg.epochs + 1):
         model.train()
+        if cfg.freeze_backbone:
+            model.scorer.backbone.eval()
         running, seen = 0.0, 0
         for a, b, y in tqdm(train_dl, desc=f"epoch {epoch}/{cfg.epochs}"):
             a, b, y = a.to(device), b.to(device), y.to(device)

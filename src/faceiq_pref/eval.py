@@ -9,17 +9,15 @@ import torch
 from PIL import Image
 from scipy.stats import kendalltau, spearmanr
 from torch.utils.data import DataLoader
-from torchvision import transforms
 from tqdm import tqdm
 
 from .data import Export, Face, split_by_face_id
 from .model import PairwiseModel, PreferenceScorer, pick_device
 from .train import (
-    IMAGENET_MEAN,
-    IMAGENET_STD,
     PairDataset,
     TrainConfig,
     _filter_rows,
+    build_transforms,
     evaluate,
 )
 
@@ -52,7 +50,7 @@ def heldout_pairwise_accuracy(
     n_raw = len(val_rows)
     val_rows = _filter_rows(val_rows, faces, export, cfg)
 
-    ds = PairDataset(val_rows, faces, export, cfg.image_size, augment=False)
+    ds = PairDataset(val_rows, faces, export, cfg.backbone, cfg.image_size, augment=False)
     dl = DataLoader(
         ds,
         batch_size or cfg.batch_size,
@@ -80,20 +78,16 @@ def score_all_faces(
     """Run the trained scorer over every face photo. Returns faceId -> model score."""
     device = pick_device()
     ckpt = torch.load(checkpoint_path, map_location=device)
-    backbone = ckpt["config"]["backbone"]
+    cfg = TrainConfig(**ckpt["config"])
+    backbone = cfg.backbone
+    image_size = cfg.image_size
     scorer = PreferenceScorer(backbone, pretrained=False).to(device)
     # PairwiseModel stores weights under scorer.*
     state = {k.removeprefix("scorer."): v for k, v in ckpt["model"].items()}
     scorer.load_state_dict(state)
     scorer.eval()
 
-    tf = transforms.Compose(
-        [
-            transforms.Resize((image_size, image_size)),
-            transforms.ToTensor(),
-            transforms.Normalize(IMAGENET_MEAN, IMAGENET_STD),
-        ]
-    )
+    tf = build_transforms(backbone, image_size, augment=False)
 
     faces = [f for f in export.faces().values() if export.image_path(f).exists()]
     scores: dict[str, float] = {}

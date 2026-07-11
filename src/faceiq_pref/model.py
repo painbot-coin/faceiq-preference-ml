@@ -10,10 +10,18 @@ import torch
 import torch.nn as nn
 from torchvision import models
 
+from .backbones.arcface import ARCface_BACKBONES, ArcFaceBackbone, is_arcface_backbone
+
 
 BACKBONES = {
     "resnet18": (models.resnet18, models.ResNet18_Weights.DEFAULT, 512),
     "resnet50": (models.resnet50, models.ResNet50_Weights.DEFAULT, 2048),
+}
+
+# DINOv2 ViTs loaded via torch.hub (no extra pip deps); embedding dim per variant.
+DINOV2_BACKBONES = {
+    "dinov2_vits14": 384,
+    "dinov2_vitb14": 768,
 }
 
 
@@ -22,11 +30,21 @@ class PreferenceScorer(nn.Module):
 
     def __init__(self, backbone: str = "resnet18", pretrained: bool = True):
         super().__init__()
-        if backbone not in BACKBONES:
-            raise ValueError(f"unknown backbone {backbone!r}; options: {list(BACKBONES)}")
-        ctor, weights, feat_dim = BACKBONES[backbone]
-        net = ctor(weights=weights if pretrained else None)
-        net.fc = nn.Identity()
+        if backbone in DINOV2_BACKBONES:
+            net = torch.hub.load("facebookresearch/dinov2", backbone, pretrained=pretrained)
+            feat_dim = DINOV2_BACKBONES[backbone]
+        elif is_arcface_backbone(backbone):
+            if backbone != "arcface_r50":
+                raise ValueError(f"unsupported ArcFace variant {backbone!r}")
+            net = ArcFaceBackbone()
+            feat_dim = ARCface_BACKBONES[backbone]
+        elif backbone in BACKBONES:
+            ctor, weights, feat_dim = BACKBONES[backbone]
+            net = ctor(weights=weights if pretrained else None)
+            net.fc = nn.Identity()
+        else:
+            options = list(BACKBONES) + list(DINOV2_BACKBONES) + list(ARCface_BACKBONES)
+            raise ValueError(f"unknown backbone {backbone!r}; options: {options}")
         self.backbone = net
         self.head = nn.Sequential(
             nn.Linear(feat_dim, 256),

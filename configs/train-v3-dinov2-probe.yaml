@@ -1,0 +1,21 @@
+# Preference comparator v3 — DINOv2 embedding probe (Harsh's suggestion).
+# Frozen DINOv2 ViT-S/14 backbone, train only the 2-layer MLP head.
+# Fast signal check: do pretrained self-supervised features already encode preference?
+# Run: python scripts/train.py --config configs/train-v3-dinov2-probe.yaml
+
+export_dir: data/exports/cmr1mr0m7000196d57zi3vcgn
+run_name: train-v3-dinov2-probe
+
+backbone: dinov2_vits14     # loaded via torch.hub; embedding dim 384
+freeze_backbone: true       # head-only training (embedding probe)
+image_size: 224             # must be a multiple of 14 for ViT-S/14 patches
+batch_size: 64
+epochs: 10
+lr: 0.001                   # higher than e2e runs: only the small head learns
+weight_decay: 0.0001
+
+val_fraction: 0.2           # split by FACE id, never by pair
+split_seed: 42
+num_workers: 4
+skip_ties: true
+augment: true
