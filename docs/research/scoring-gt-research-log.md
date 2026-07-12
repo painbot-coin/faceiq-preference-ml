@@ -915,7 +915,7 @@ These are descriptive diagnostics, not gates; no action required. Script inline 
 
 ### 5.3 Preference model training
 
-**Status:** Not started.
+**Status:** In progress — 7 runs complete (2026-07-08 → 07-11), best **78.1%** val pairwise accuracy (ArcFace R50 e2e). v8 (extended ArcFace) running.
 
 #### Methodology
 
@@ -940,15 +940,45 @@ These are descriptive diagnostics, not gates; no action required. Script inline 
 - **BT `/10` and θ:** evaluation, dashboard, and future anchor metadata — **not** the loss target.
 - **Elite crowding** (§5.2) compresses research-cohort `/10` at the top; training still benefits from elite-vs-elite pairwise structure. See §5.4 for how production `/10` is assigned via anchors, not research percentiles.
 
-<!-- Train/val split by face id, hyperparameters. -->
+**Common setup (all runs):** split by face id, seed 42, 80/20 → 33,449 train / 2,068 val pairs scored; ties skipped (113); labels = `finalOutcome` only; RankNet BCE loss; AdamW; MPS (Apple Silicon). Runs are directly comparable — identical split and eval.
 
 #### Results
 
-<!-- Val pairwise accuracy, Kendall τ vs BT. -->
+| Run | Backbone | Mode | Key config | Best ep | Val loss | Val acc | Kendall τ | Spearman ρ |
+|---|---|---|---|---|---|---|---|---|
+| train-v1 | ResNet-18 (ImageNet) | e2e | 224px, lr 1e-4, wd 1e-4, 10 ep | 7 | 0.525 | 76.6% | 0.832 | 0.956 |
+| train-v2 | ResNet-50 (ImageNet) | e2e | wd 5e-4, 8 ep | 2 | 0.495 | 75.4% | 0.801 | 0.944 |
+| train-v3 | DINOv2 ViT-S/14 | frozen probe | lr 1e-3, 10 ep | 3 | 0.573 | 72.4% | 0.720 | 0.892 |
+| train-v4 | ResNet-18 | e2e | wd 3e-4, 7 ep | 6 | 0.505 | 76.7% | 0.826 | 0.953 |
+| train-v6 | ArcFace R50 (w600k) | frozen probe | 112px, lr 1e-3, 10 ep | 4 | 0.568 | 74.6% | 0.805 | 0.940 |
+| **train-v7** | **ArcFace R50 (w600k)** | **e2e** | **112px, lr 1e-5, bs 32, 8 ep** | **8** | **0.467** | **78.1%** | **0.842** | **0.962** |
+| train-v8 | ArcFace R50 | e2e | v7 + 16 ep | *running* | | | | |
+
+(v5 = DINOv2 e2e config exists, not yet run.)
+
+**Findings so far:**
+
+- Signal confirmed on first run (v1: 76.6% vs ~85% label ceiling; ρ 0.96 vs BT).
+- Capacity is not the bottleneck: ResNet-50 (v2) < ResNet-18 (v1).
+- Frozen embedding probes underperform e2e: DINOv2 probe 72.4%, ArcFace probe 74.6% — pretrained features alone don't encode preference; fine-tuning matters.
+- **Face-specific backbone + fine-tune wins:** ArcFace e2e (v7) = 78.1%, still improving at final epoch → v8 extends to 16 epochs.
+- ResNet runs overfit after ~epoch 7; ArcFace e2e (lr 1e-5) did not overfit within 8 epochs.
+
+**Future training tests (queued):**
+
+- [ ] **High-confidence-only training** — drop medium/low-confidence VLM pairs from train (keep full val). Audit: high ≈ 87% vs medium ≈ 74% label accuracy; directly attacks label noise on close matchups. Needs small code change (confidence filter in `train.py`, mirroring `run_bt.py --confidence`).
+- [ ] **Ensemble** — average v7 (ArcFace) + v1 (ResNet-18) scores; typically +0.5–1pp; no training needed, eval-only change.
+- [ ] Stratified eval by VLM confidence / BT θ-gap (easy-vs-hard pairs) — diagnostic, defines "clear winner" performance.
+- [ ] Positional-bias check (accuracy on A-wins vs B-wins pairs) — order-symmetry guard from methodology.
+- [ ] DINOv2 e2e (v5 config, ready) — lower priority after ArcFace e2e won.
+- [ ] LR schedule (cosine/step decay) on the winning recipe.
 
 #### Artifacts
 
-<!-- Checkpoint path, config YAML. -->
+- Checkpoints: `faceiq-preference-ml/checkpoints/train-vN*/best.pt`; metrics + eval: `artifacts/train-vN*/{metrics,eval}.json` + `model_scores.csv`
+- Configs: `faceiq-preference-ml/configs/train-v*.yaml`; run logs: `artifacts/train-v*-full-run.log`
+- Best model: `checkpoints/train-v7-arcface-e2e/best.pt` (78.1%, ep 8)
+- Dashboard: `streamlit run app/dashboard.py --server.port 8502` → Training runs tab
 
 ---
 

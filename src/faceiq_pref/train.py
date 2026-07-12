@@ -58,6 +58,7 @@ class TrainConfig:
     augment: bool = True
     max_pairs: int | None = None  # subsample for smoke tests
     freeze_backbone: bool = False  # embedding probe: train only the head
+    confidence_filter: str | None = None  # train only: high | medium | low (human labels kept)
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> "TrainConfig":
@@ -96,6 +97,18 @@ class PairDataset(Dataset):
         return self._load(m.face_a_id), self._load(m.face_b_id), torch.tensor(label)
 
 
+def _apply_confidence_filter(rows: list[Matchup], floor: str) -> list[Matchup]:
+    """Keep human-audited pairs; for VLM pairs require confidence >= floor."""
+    order = {"low": 0, "medium": 1, "high": 2}
+    min_level = order[floor]
+    return [
+        m
+        for m in rows
+        if m.human_labeled_at is not None
+        or (m.confidence is not None and order.get(m.confidence, 0) >= min_level)
+    ]
+
+
 def _filter_rows(rows: list[Matchup], faces: dict[str, Face], export: Export, cfg: TrainConfig):
     kept = []
     for m in rows:
@@ -130,6 +143,13 @@ def train(export: Export, cfg: TrainConfig) -> dict:
         matchups = matchups[: cfg.max_pairs]
 
     train_rows, val_rows = split_by_face_id(matchups, cfg.val_fraction, cfg.split_seed)
+    if cfg.confidence_filter:
+        before = len(train_rows)
+        train_rows = _apply_confidence_filter(train_rows, cfg.confidence_filter)
+        print(
+            f"confidence filter >= {cfg.confidence_filter} (train only): "
+            f"{before} -> {len(train_rows)} pairs"
+        )
     train_rows = _filter_rows(train_rows, faces, export, cfg)
     val_rows = _filter_rows(val_rows, faces, export, cfg)
 
