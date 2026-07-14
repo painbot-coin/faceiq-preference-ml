@@ -1,0 +1,23 @@
+# ArcFace e2e with a 50/50 face split — diagnostic for val reliability / overfitting.
+# NOTE: face-level 50/50 means ~25%/25% of PAIRS (mixed pairs dropped): train shrinks
+# from ~33.4k to ~13k pairs and the val set changes entirely, so val accuracy is NOT
+# comparable to the 78.4% v8 baseline. Compare via rank agreement vs BT (tau/rho) and
+# the shape of the val curve instead.
+# Run: python scripts/train.py --config configs/train-v10-arcface-val50.yaml
+
+export_dir: data/exports/cmr1mr0m7000196d57zi3vcgn
+run_name: train-v10-arcface-val50
+
+backbone: arcface_r50
+freeze_backbone: false
+image_size: 112
+batch_size: 32
+epochs: 10
+lr: 0.00001
+weight_decay: 0.0001
+
+val_fraction: 0.5
+split_seed: 42
+num_workers: 4
+skip_ties: true
+augment: true

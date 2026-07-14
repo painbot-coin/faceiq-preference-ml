@@ -915,7 +915,7 @@ These are descriptive diagnostics, not gates; no action required. Script inline 
 
 ### 5.3 Preference model training
 
-**Status:** In progress — 7 runs complete (2026-07-08 → 07-11), best **78.1%** val pairwise accuracy (ArcFace R50 e2e). v8 (extended ArcFace) running.
+**Status:** In progress — 9 training runs + 1 ensemble complete (2026-07-08 → 07-12). Best **single-model** val pairwise accuracy: **78.4%** (train-v8, ArcFace R50 e2e, best @ ep 5 of 16). Best **rank agreement**: ensemble-v7-v1 (τ 0.858, ρ 0.967). Training moved to EC2 g5.xlarge (A10G) 2026-07-12 — ~45 min per 8-ep ArcFace e2e run vs ~5 h on Mac MPS; v8 long run ~90 min on GPU.
 
 #### Methodology
 
@@ -951,23 +951,27 @@ These are descriptive diagnostics, not gates; no action required. Script inline 
 | train-v3 | DINOv2 ViT-S/14 | frozen probe | lr 1e-3, 10 ep | 3 | 0.573 | 72.4% | 0.720 | 0.892 |
 | train-v4 | ResNet-18 | e2e | wd 3e-4, 7 ep | 6 | 0.505 | 76.7% | 0.826 | 0.953 |
 | train-v6 | ArcFace R50 (w600k) | frozen probe | 112px, lr 1e-3, 10 ep | 4 | 0.568 | 74.6% | 0.805 | 0.940 |
-| **train-v7** | **ArcFace R50 (w600k)** | **e2e** | **112px, lr 1e-5, bs 32, 8 ep** | **8** | **0.467** | **78.1%** | **0.842** | **0.962** |
-| train-v8 | ArcFace R50 | e2e | v7 + 16 ep | *running* | | | | |
+| **train-v7** | ArcFace R50 (w600k) | e2e | 112px, lr 1e-5, bs 32, 8 ep | 8 | 0.467 | 78.1% | 0.842 | 0.962 |
+| **train-v8** | **ArcFace R50** | **e2e** | **v7 + 16 ep (GPU)** | **5** | **0.453** | **78.4%** | 0.840 | 0.962 |
+| train-v9 | ArcFace R50 | e2e, high-conf train filter | v7 recipe; train 33,449 → 28,422 pairs (high-conf VLM + all human; val unchanged) | 8 | 0.526 | 78.1% | 0.828 | 0.957 |
+| ensemble-v7-v1 | ArcFace R50 + ResNet-18 | eval-only ensemble | z-scored per-face scores averaged (`scripts/ensemble_eval.py`) | — | — | 78.1% | **0.858** | **0.967** |
 
-(v5 = DINOv2 e2e config exists, not yet run.)
+(v5 = DINOv2 e2e config exists, not yet run. v8 was first started on Mac and stopped at ep 2/16 — 77.7%, redundant once GPU came online; full 16 ep completed on GPU 2026-07-12.)
 
 **Findings so far:**
 
 - Signal confirmed on first run (v1: 76.6% vs ~85% label ceiling; ρ 0.96 vs BT).
 - Capacity is not the bottleneck: ResNet-50 (v2) < ResNet-18 (v1).
 - Frozen embedding probes underperform e2e: DINOv2 probe 72.4%, ArcFace probe 74.6% — pretrained features alone don't encode preference; fine-tuning matters.
-- **Face-specific backbone + fine-tune wins:** ArcFace e2e (v7) = 78.1%, still improving at final epoch → v8 extends to 16 epochs.
-- ResNet runs overfit after ~epoch 7; ArcFace e2e (lr 1e-5) did not overfit within 8 epochs.
+- **Face-specific backbone + fine-tune wins:** ArcFace e2e (v7) = 78.1%; extending to 16 epochs (v8) peaked at **ep 5 → 78.4%** (+0.3 pp), then val accuracy drifted down (76.5–77.3% ep 8–12) — ArcFace e2e **does** overfit if run too long; early stopping / shorter schedule recommended.
+- ResNet runs overfit after ~epoch 7; ArcFace e2e (lr 1e-5) overfits later but still peaks before 16 epochs.
+- **High-confidence filtering didn't help (v9):** dropping medium/low-confidence VLM train pairs (~15% of train) matched v7 on val accuracy (78.14% vs 78.09% — noise) but was slightly worse on rank agreement (τ 0.828 vs 0.842, ρ 0.957 vs 0.962). Medium-confidence label noise is not the current bottleneck; the extra pairs are worth keeping.
+- **Ensemble is the best ranker (ensemble-v7-v1):** averaging z-scored v7 (ArcFace) + v1 (ResNet-18) face scores left val accuracy at 78.1% (tied — near the recoverable ceiling given label noise) but produced the **best rank agreement of any run**: τ 0.858, ρ 0.967 (v7 alone: 0.842 / 0.962). Diverse backbones cancel per-model ranking errors even when pairwise accuracy saturates.
 
 **Future training tests (queued):**
 
-- [ ] **High-confidence-only training** — drop medium/low-confidence VLM pairs from train (keep full val). Audit: high ≈ 87% vs medium ≈ 74% label accuracy; directly attacks label noise on close matchups. Needs small code change (confidence filter in `train.py`, mirroring `run_bt.py --confidence`).
-- [ ] **Ensemble** — average v7 (ArcFace) + v1 (ResNet-18) scores; typically +0.5–1pp; no training needed, eval-only change.
+- [x] **High-confidence-only training** — done as **train-v9** (2026-07-12): no gain over v7; see findings. Filter kept in `train.py` (`confidence_filter`) for future ablations.
+- [x] **Ensemble** — done as **ensemble-v7-v1** (2026-07-12) via new `scripts/ensemble_eval.py`: accuracy flat, rank agreement best-in-class; see findings.
 - [ ] Stratified eval by VLM confidence / BT θ-gap (easy-vs-hard pairs) — diagnostic, defines "clear winner" performance.
 - [ ] Positional-bias check (accuracy on A-wins vs B-wins pairs) — order-symmetry guard from methodology.
 - [ ] DINOv2 e2e (v5 config, ready) — lower priority after ArcFace e2e won.
@@ -977,7 +981,8 @@ These are descriptive diagnostics, not gates; no action required. Script inline 
 
 - Checkpoints: `faceiq-preference-ml/checkpoints/train-vN*/best.pt`; metrics + eval: `artifacts/train-vN*/{metrics,eval}.json` + `model_scores.csv`
 - Configs: `faceiq-preference-ml/configs/train-v*.yaml`; run logs: `artifacts/train-v*-full-run.log`
-- Best model: `checkpoints/train-v7-arcface-e2e/best.pt` (78.1%, ep 8)
+- Best single model: `checkpoints/train-v8-arcface-e2e-long/best.pt` (78.4%, ep 5)
+- Best ranker (ensemble): `ensemble-v7-v1` eval in `artifacts/ensemble-v7-v1/eval.json` (τ 0.858, ρ 0.967)
 - Dashboard: `streamlit run app/dashboard.py --server.port 8502` → Training runs tab
 
 ---
