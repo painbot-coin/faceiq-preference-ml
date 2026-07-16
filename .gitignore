@@ -2,7 +2,12 @@
 data/
 checkpoints/
 artifacts/
+external/
 *-export.zip
+
+# Pilot-500 answer key (bucket/p/Gemini per pair) — local only, regenerable;
+# votes-*.jsonl and pairs.json in the same dir ARE committed
+labels/pilot-500/sample-meta.json
 
 # Python
 .venv/

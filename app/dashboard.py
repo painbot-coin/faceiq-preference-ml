@@ -62,10 +62,16 @@ def export_for_run(run_id: str | None) -> Path | None:
     return exports[0] if exports else None
 
 
-(tab_overview, tab_health, tab_rankings, tab_diag, tab_training, tab_inspect, tab_infer,
- tab_anchor) = st.tabs(
+def gender_choices(series: pd.Series) -> list[str]:
+    """Sorted gender labels, ignoring NaN / empty / non-string values."""
+    vals = [v for v in series.dropna().unique() if isinstance(v, str) and v.strip()]
+    return sorted(vals)
+
+
+(tab_overview, tab_health, tab_rankings, tab_diag, tab_training, tab_inspect, tab_gallery,
+ tab_infer, tab_anchor, tab_labeler) = st.tabs(
     ["Runs overview", "Export health", "BT rankings", "Refit diagnostics", "Training runs",
-     "Model inspection", "Inference", "Anchor panel"]
+     "Model inspection", "Model gallery", "Inference", "Anchor panel", "Pilot-500 labeler"]
 )
 
 
@@ -191,7 +197,7 @@ with tab_rankings:
             st.warning("No export folder found — photos unavailable.")
 
         col1, col2, col3 = st.columns(3)
-        gender = col1.selectbox("Gender", ["all"] + sorted(df["gender"].unique().tolist()))
+        gender = col1.selectbox("Gender", ["all"] + gender_choices(df["gender"]))
         section = col2.selectbox("Section", ["top", "around median", "bottom"])
         n = col3.slider("Show N", 10, 200, 50)
 
@@ -434,11 +440,88 @@ def find_score_runs() -> list[Path]:
     return sorted(p.parent for p in base.glob("*/model_scores.csv"))
 
 
+MODEL_LABELS: dict[str, str] = {
+    "external-scut": "SCUT (ResNet-18)",
+    "external-mebeauty": "MEBeauty (ResNet-18)",
+    "train-v8-arcface-e2e-long": "FaceIQ v8 (ArcFace)",
+    "train-v7-arcface-e2e": "FaceIQ v7 (ArcFace)",
+    "train-v1": "FaceIQ v1 (ResNet-18)",
+    "ensemble-v7-v1": "Ensemble v7+v1",
+}
+
+
+def model_label(run_name: str) -> str:
+    return MODEL_LABELS.get(run_name, run_name)
+
+
+@st.cache_data(show_spinner="Merging model scores...")
+def load_merged_model_scores(run_names: tuple[str, ...]) -> pd.DataFrame:
+    """Join per-face scores from multiple artifact dirs on faceId."""
+    if not run_names:
+        return pd.DataFrame()
+
+    base: pd.DataFrame | None = None
+    for name in run_names:
+        path = ROOT / "artifacts" / name / "model_scores.csv"
+        if not path.exists():
+            continue
+        sc = pd.read_csv(path)[["faceId", "modelScore"]].rename(
+            columns={"modelScore": f"score__{name}"}
+        )
+        if base is None:
+            sc_meta = pd.read_csv(path)
+            keep = ["faceId", "gender", "theta"]
+            base = sc_meta[keep].merge(sc, on="faceId", how="inner")
+        else:
+            base = base.merge(sc, on="faceId", how="inner")
+
+    if base is None or base.empty:
+        return pd.DataFrame()
+
+    refits = find_bt_refits()
+    if refits:
+        ratings = pd.read_csv(refits[0] / "ratings.csv")
+        extra = ratings[["faceId", "scoreOutOf10", "percentile", "labsOverallScore"]]
+        base = base.merge(extra, on="faceId", how="left", suffixes=("", "_dup"))
+        base = base.drop(columns=[c for c in base.columns if c.endswith("_dup")], errors="ignore")
+
+    spread_path = ROOT / "artifacts" / "ensemble-spread-v1" / "spread.csv"
+    if spread_path.exists():
+        spread = pd.read_csv(spread_path)[["faceId", "spread", "meanScore"]]
+        base = base.merge(spread, on="faceId", how="left")
+
+    for name in run_names:
+        col = f"score__{name}"
+        if col not in base.columns:
+            continue
+        base[f"pct__{name}"] = base.groupby("gender")[col].rank(pct=True) * 100
+
+    return base
+
+
 def find_checkpoints() -> list[Path]:
     base = ROOT / "checkpoints"
     if not base.exists():
         return []
     return sorted(base.glob("*/best.pt"))
+
+
+def find_ensemble_presets() -> dict[str, list[Path]]:
+    """Artifact dirs whose eval.json lists 2+ member checkpoints."""
+    presets: dict[str, list[Path]] = {}
+    for eval_path in sorted((ROOT / "artifacts").glob("*/eval.json")):
+        data = json.loads(eval_path.read_text())
+        ckpts = data.get("checkpoints")
+        if not ckpts or len(ckpts) < 2:
+            continue
+        presets[eval_path.parent.name] = [ROOT / c for c in ckpts]
+    return presets
+
+
+def zscore_raw(raw: float, cohort: pd.Series) -> float:
+    mu = float(cohort.mean())
+    sd = float(cohort.std(ddof=0)) or 1.0
+    return (raw - mu) / sd
 
 
 @st.cache_data(show_spinner="Loading face image paths...")
@@ -537,7 +620,7 @@ with tab_inspect:
             "noisy there. (rank 1 = most attractive within gender)"
         )
         c1, c2 = st.columns(2)
-        gender_d = c1.selectbox("Gender", sorted(sc["gender"].unique()), key="inspect_gender")
+        gender_d = c1.selectbox("Gender", gender_choices(sc["gender"]), key="inspect_gender")
         n_d = c2.slider("Show N", 3, 15, 5, key="inspect_n")
 
         g_view = sc[sc["gender"] == gender_d]
@@ -631,37 +714,216 @@ with tab_inspect:
                 st.divider()
 
 
+# ---------------------------------------------------------------- model gallery (visual cross-check)
+
+with tab_gallery:
+    st.caption(
+        "Browse cohort faces by model score. Filter on a percentile range within gender "
+        "(comparable across models on different scales), toggle which scores appear on "
+        "each card, and eyeball whether the ranking looks right. SCUT / MEBeauty are "
+        "research-only cross-checks — not production models."
+    )
+
+    score_runs = find_score_runs()
+    if not score_runs:
+        st.info("No model_scores.csv files yet. Run evaluate.py or external_crosscheck.py first.")
+    else:
+        all_names = [p.name for p in score_runs]
+        default_names = [
+            n for n in ("external-scut", "external-mebeauty", "train-v8-arcface-e2e-long")
+            if n in all_names
+        ] or all_names[-3:]
+
+        exports = find_exports()
+        export_dir = st.selectbox(
+            "Export (photos)",
+            exports,
+            format_func=lambda p: p.name,
+            key="gallery_export",
+        ) if exports else None
+        img_paths = (
+            load_face_image_paths(str(export_dir)) if export_dir is not None else {}
+        )
+
+        c_models, c_gender = st.columns([3, 1])
+        selected = c_models.multiselect(
+            "Models to show on cards",
+            all_names,
+            default=default_names,
+            format_func=model_label,
+            key="gallery_models",
+        )
+        gender_g = c_gender.selectbox(
+            "Gender", ["female", "male"], key="gallery_gender",
+        )
+
+        merged = load_merged_model_scores(tuple(selected))
+        if merged.empty:
+            st.warning("No overlapping faces across the selected models.")
+        else:
+            view = merged[merged["gender"] == gender_g].copy()
+            filter_choices = [n for n in selected if f"pct__{n}" in view.columns]
+            if not filter_choices:
+                st.stop()
+
+            c_filt, c_sort, c_grid = st.columns([2, 2, 1])
+            filter_model = c_filt.selectbox(
+                "Filter by model (percentile within gender)",
+                filter_choices,
+                format_func=model_label,
+                key="gallery_filter_model",
+            )
+            pct_col = f"pct__{filter_model}"
+            lo, hi = c_filt.slider(
+                "Percentile range",
+                0.0, 100.0, (0.0, 100.0), 1.0,
+                key="gallery_pct_range",
+            )
+            sort_opts = {
+                f"score__{filter_model}": f"{model_label(filter_model)} score (high first)",
+                "theta": "BT theta (high first)",
+                "scoreOutOf10": "BT /10 (high first)",
+            }
+            if "spread" in view.columns:
+                sort_opts["spread"] = "Model disagreement (high first)"
+            for n in selected:
+                sort_opts[f"score__{n}"] = f"{model_label(n)} raw score"
+            sort_col = c_sort.selectbox(
+                "Sort by", list(sort_opts.keys()),
+                format_func=lambda k: sort_opts[k],
+                key="gallery_sort",
+            )
+            cols_per_row = c_grid.selectbox("Columns", [3, 4, 5, 6], index=1, key="gallery_cols")
+            n_show = c_grid.slider("Show N faces", 5, 60, 20, 5, key="gallery_n")
+
+            view = view[(view[pct_col] >= lo) & (view[pct_col] <= hi)]
+            view = view.sort_values(sort_col, ascending=False).head(n_show).reset_index(drop=True)
+
+            st.caption(
+                f"Showing **{len(view)}** {gender_g} faces "
+                f"({model_label(filter_model)} percentile {lo:.0f}–{hi:.0f}%) · "
+                f"{len(merged[merged['gender'] == gender_g]):,} total in cohort"
+            )
+
+            if filter_choices:
+                hist = merged[merged["gender"] == gender_g]
+                st.plotly_chart(
+                    px.histogram(
+                        hist, x=f"pct__{filter_model}",
+                        nbins=40,
+                        title=f"{model_label(filter_model)} percentile distribution ({gender_g})",
+                        labels={f"pct__{filter_model}": "percentile"},
+                    ),
+                    use_container_width=True,
+                )
+
+            for start in range(0, len(view), cols_per_row):
+                cols = st.columns(cols_per_row)
+                for col, (_, row) in zip(cols, view.iloc[start : start + cols_per_row].iterrows()):
+                    with col:
+                        fid = row["faceId"]
+                        p = img_paths.get(fid)
+                        if p and Path(p).exists():
+                            st.image(p, use_container_width=True)
+                        else:
+                            st.caption("(image missing)")
+                        lines = [
+                            f"**BT** θ {row['theta']:.2f} · /10 {row.get('scoreOutOf10', float('nan')):.2f}"
+                            if pd.notna(row.get("scoreOutOf10"))
+                            else f"**BT** θ {row['theta']:.2f}",
+                        ]
+                        for name in selected:
+                            sc = row.get(f"score__{name}")
+                            pct = row.get(f"pct__{name}")
+                            if pd.notna(sc):
+                                lines.append(
+                                    f"**{model_label(name)}** {sc:.2f} "
+                                    f"({pct:.0f}th pct)"
+                                    if pd.notna(pct)
+                                    else f"**{model_label(name)}** {sc:.2f}"
+                                )
+                        if pd.notna(row.get("spread")):
+                            lines.append(f"spread {row['spread']:.3f}")
+                        st.markdown("  \n".join(lines))
+                        with st.expander("faceId"):
+                            st.code(fid)
+
+
 # ---------------------------------------------------------------- inference
 
 with tab_infer:
     st.caption(
-        "Score new, unseen photos with a trained checkpoint and see where they land in the "
-        "ranked cohort. Sanity-check tool — not the production anchor-ladder."
+        "Score new, unseen photos with a trained checkpoint (or ensemble) and see where they "
+        "land in the ranked cohort. Sanity-check tool — not the production anchor-ladder."
     )
     ckpts = find_checkpoints()
+    ensembles = find_ensemble_presets()
     if not ckpts:
         st.info("No checkpoints found under checkpoints/*/best.pt.")
     else:
-        ckpt_path = st.selectbox(
-            "Checkpoint", ckpts, format_func=lambda p: p.parent.name,
-            index=len(ckpts) - 1, key="infer_ckpt",
+        infer_mode = st.radio(
+            "Scorer", ["Single checkpoint", "Ensemble"],
+            horizontal=True, key="infer_mode",
         )
-
-        # cohort context: model_scores.csv of the same run when available
         score_runs = find_score_runs()
-        default_ctx = next(
-            (i for i, p in enumerate(score_runs) if p.name == ckpt_path.parent.name),
-            len(score_runs) - 1 if score_runs else 0,
-        )
-        ctx_dir = st.selectbox(
-            "Cohort context (per-face scores of this run)", score_runs,
-            format_func=lambda p: p.name, index=default_ctx, key="infer_ctx",
-        ) if score_runs else None
-        if ctx_dir is not None and ctx_dir.name != ckpt_path.parent.name:
-            st.warning(
-                "Context run differs from the checkpoint — percentiles are only meaningful "
-                "when both come from the same run."
+        member_z_cohorts: list[pd.Series] = []
+
+        if infer_mode == "Single checkpoint":
+            ckpt_path = st.selectbox(
+                "Checkpoint", ckpts, format_func=lambda p: p.parent.name,
+                index=len(ckpts) - 1, key="infer_ckpt",
             )
+            member_ckpts: list[Path] = [ckpt_path]
+            default_ctx = next(
+                (i for i, p in enumerate(score_runs) if p.name == ckpt_path.parent.name),
+                len(score_runs) - 1 if score_runs else 0,
+            )
+            ctx_dir = st.selectbox(
+                "Cohort context (per-face scores of this run)", score_runs,
+                format_func=lambda p: p.name, index=default_ctx, key="infer_ctx",
+            ) if score_runs else None
+            if ctx_dir is not None and ctx_dir.name != ckpt_path.parent.name:
+                st.warning(
+                    "Context run differs from the checkpoint — percentiles are only meaningful "
+                    "when both come from the same run."
+                )
+        else:
+            if not ensembles:
+                st.info(
+                    "No ensemble presets found. Run `scripts/ensemble_eval.py` first "
+                    "(writes artifacts/<name>/eval.json with a checkpoints list)."
+                )
+                st.stop()
+            ens_names = sorted(ensembles)
+            ens_name = st.selectbox(
+                "Ensemble", ens_names, format_func=model_label,
+                index=ens_names.index("ensemble-v7-v1") if "ensemble-v7-v1" in ens_names else 0,
+                key="infer_ensemble",
+            )
+            member_ckpts = ensembles[ens_name]
+            st.caption(
+                "Members: "
+                + ", ".join(model_label(p.parent.name) for p in member_ckpts)
+            )
+            ctx_dir = ROOT / "artifacts" / ens_name
+            if not (ctx_dir / "model_scores.csv").exists():
+                st.error(f"Missing {ctx_dir / 'model_scores.csv'} — re-run ensemble_eval.py.")
+                st.stop()
+            missing = [
+                p.parent.name for p in member_ckpts
+                if not (ROOT / "artifacts" / p.parent.name / "model_scores.csv").exists()
+            ]
+            if missing:
+                st.error(
+                    "Missing per-face scores for ensemble members: "
+                    + ", ".join(missing)
+                    + ". Run scripts/evaluate.py --ratings on each first."
+                )
+                st.stop()
+            member_z_cohorts = [
+                pd.read_csv(ROOT / "artifacts" / p.parent.name / "model_scores.csv")["modelScore"]
+                for p in member_ckpts
+            ]
 
         gender_ctx = st.selectbox("Compare against", ["female", "male"], key="infer_gender")
         normalize = st.checkbox(
@@ -677,7 +939,6 @@ with tab_infer:
             import torch
             from PIL import Image
 
-            scorer, cfg, tf = load_scorer_cached(str(ckpt_path))
             use_norm = normalize and normalizer_available()
             if normalize and not use_norm:
                 st.warning("mediapipe not available (`uv pip install mediapipe`) — scoring uncropped images.")
@@ -703,8 +964,22 @@ with tab_infer:
                     else:
                         shown = cropped
 
-                with torch.no_grad():
-                    s = scorer(tf(shown).unsqueeze(0)).item()
+                if infer_mode == "Ensemble":
+                    z_parts: list[float] = []
+                    member_raw: list[tuple[str, float, float]] = []
+                    for ckpt, z_cohort in zip(member_ckpts, member_z_cohorts):
+                        scorer, _cfg, tf = load_scorer_cached(str(ckpt))
+                        with torch.no_grad():
+                            raw = scorer(tf(shown).unsqueeze(0)).item()
+                        z = zscore_raw(raw, z_cohort)
+                        z_parts.append(z)
+                        member_raw.append((ckpt.parent.name, raw, z))
+                    s = sum(z_parts) / len(z_parts)
+                else:
+                    scorer, _cfg, tf = load_scorer_cached(str(member_ckpts[0]))
+                    with torch.no_grad():
+                        s = scorer(tf(shown).unsqueeze(0)).item()
+                    member_raw = []
 
                 pct = float((cohort["modelScore"] < s).mean())
                 c_img, c_res = st.columns([1, 3])
@@ -712,10 +987,11 @@ with tab_infer:
                     st.image(shown, use_container_width=True)
                     st.caption(up.name)
                 with c_res:
+                    score_label = "Ensemble z-score" if infer_mode == "Ensemble" else "Model score"
                     st.metric(
                         "Cohort percentile",
                         f"{pct:.1%}",
-                        help=f"model score {s:.3f} vs {len(cohort)} {gender_ctx} cohort faces",
+                        help=f"{score_label} {s:.3f} vs {len(cohort)} {gender_ctx} cohort faces",
                     )
                     if ratings is not None:
                         # approximate /10 from the 5 nearest cohort faces by model score
@@ -728,6 +1004,10 @@ with tab_infer:
                             "Approx. /10 (5 nearest cohort faces)",
                             f"{nearest['scoreOutOf10'].mean():.2f}",
                         )
+                    if member_raw:
+                        with st.expander("Per-member scores"):
+                            for name, raw, z in member_raw:
+                                st.write(f"**{model_label(name)}** — raw {raw:.3f}, z {z:.3f}")
 
                     # ladder: 3 cohort faces just below and above
                     pos = int((cohort["modelScore"] < s).sum())
@@ -974,9 +1254,17 @@ with tab_anchor:
                                 p = anchor_image_path(r["anchor"])
                                 if p.exists():
                                     st.image(str(p), use_container_width=True)
-                                verdict = "beats" if r["beats"] else "loses"
-                                st.caption(
-                                    f"**{r['anchor'].product_score:g}** · {verdict} "
-                                    f"({r['p_win']:.0%})"
-                                )
+                        verdict = "beats" if r["beats"] else "loses"
+                        st.caption(
+                            f"**{r['anchor'].product_score:g}** · {verdict} "
+                            f"({r['p_win']:.0%})"
+                        )
                     st.divider()
+
+
+# ---------------------------------------------------------------- pilot-500 labeler
+
+with tab_labeler:
+    from labeler_ui import render_labeler
+
+    render_labeler()
