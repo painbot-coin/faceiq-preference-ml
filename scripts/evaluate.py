@@ -28,7 +28,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 import torch
 
 from faceiq_pref.data import load_export
-from faceiq_pref.eval import heldout_pairwise_accuracy, rank_agreement_vs_bt, score_all_faces
+from faceiq_pref.eval import (
+    heldout_pairwise_accuracy,
+    rank_agreement_vs_bt,
+    score_all_faces_dist,
+)
 
 
 def main() -> int:
@@ -54,7 +58,7 @@ def main() -> int:
     )
 
     if args.ratings:
-        scores = score_all_faces(args.checkpoint, export)
+        scores, sigmas = score_all_faces_dist(args.checkpoint, export)
         agreement = rank_agreement_vs_bt(scores, args.ratings)
         results["rank_agreement_vs_bt"] = agreement
         print(
@@ -70,13 +74,17 @@ def main() -> int:
                 bt_rows[row["faceId"]] = row
         scores_path = out.parent / "model_scores.csv"
         out.parent.mkdir(parents=True, exist_ok=True)
+        header = ["faceId", "gender", "theta", "modelScore"] + (["modelSigma"] if sigmas else [])
         with scores_path.open("w", newline="") as f:
             writer = csv.writer(f)
-            writer.writerow(["faceId", "gender", "theta", "modelScore"])
+            writer.writerow(header)
             for fid, s in scores.items():
                 bt = bt_rows.get(fid)
                 if bt:
-                    writer.writerow([fid, bt["gender"], bt["theta"], round(s, 6)])
+                    row = [fid, bt["gender"], bt["theta"], round(s, 6)]
+                    if sigmas:
+                        row.append(round(sigmas[fid], 6))
+                    writer.writerow(row)
         print(f"wrote {scores_path}")
 
     out.parent.mkdir(parents=True, exist_ok=True)

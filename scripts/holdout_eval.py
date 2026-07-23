@@ -64,7 +64,9 @@ def main() -> int:
     export = load_export(args.export or cfg.export_dir)
     print(f"export OK: run {export.run_id} — holdout eval for {cfg.run_name!r}")
 
-    model = PairwiseModel(cfg.backbone, pretrained=False).to(device)
+    model = PairwiseModel(cfg.backbone, pretrained=False, variance_head=cfg.variance_head).to(
+        device
+    )
     model.load_state_dict(ckpt["model"])
     model.eval()
 

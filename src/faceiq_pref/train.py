@@ -59,6 +59,7 @@ class TrainConfig:
     max_pairs: int | None = None  # subsample for smoke tests
     freeze_backbone: bool = False  # embedding probe: train only the head
     confidence_filter: str | None = None  # train only: high | medium | low (human labels kept)
+    variance_head: bool = False  # UOL-style per-face Gaussian; probabilistic RankNet logit
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> "TrainConfig":
@@ -160,7 +161,7 @@ def train(export: Export, cfg: TrainConfig) -> dict:
     )
     val_dl = DataLoader(val_ds, cfg.batch_size, num_workers=cfg.num_workers, pin_memory=True)
 
-    model = PairwiseModel(cfg.backbone).to(device)
+    model = PairwiseModel(cfg.backbone, variance_head=cfg.variance_head).to(device)
     if cfg.freeze_backbone:
         for p in model.scorer.backbone.parameters():
             p.requires_grad = False

@@ -1,0 +1,23 @@
+# v8 recipe + UOL-style uncertainty: each face scored as N(mu, sigma^2), pairwise
+# logit (mu_A - mu_B) / sqrt(1 + var_A + var_B). Ablation question: does modeling
+# ambiguous pairs explicitly help accuracy/calibration, and are per-face sigmas
+# usable for anchor-ladder inference (§5.4) and controversy flags?
+# Run: python scripts/train.py --config configs/train-v11-arcface-variance.yaml
+
+export_dir: data/exports/cmr1mr0m7000196d57zi3vcgn
+run_name: train-v11-arcface-variance
+
+backbone: arcface_r50
+freeze_backbone: false
+variance_head: true
+image_size: 112
+batch_size: 32
+epochs: 16
+lr: 0.00001
+weight_decay: 0.0001
+
+val_fraction: 0.2
+split_seed: 42
+num_workers: 4
+skip_ties: true
+augment: true

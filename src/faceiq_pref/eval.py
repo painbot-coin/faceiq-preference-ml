@@ -38,7 +38,9 @@ def heldout_pairwise_accuracy(
     ckpt = torch.load(checkpoint_path, map_location=device)
     cfg = TrainConfig(**ckpt["config"])
 
-    model = PairwiseModel(cfg.backbone, pretrained=False).to(device)
+    model = PairwiseModel(cfg.backbone, pretrained=False, variance_head=cfg.variance_head).to(
+        device
+    )
     model.load_state_dict(ckpt["model"])
     model.eval()
 
@@ -76,12 +78,29 @@ def score_all_faces(
     batch_size: int = 128,
 ) -> dict[str, float]:
     """Run the trained scorer over every face photo. Returns faceId -> model score."""
+    scores, _ = score_all_faces_dist(checkpoint_path, export, image_size, batch_size)
+    return scores
+
+
+@torch.no_grad()
+def score_all_faces_dist(
+    checkpoint_path: str | Path,
+    export: Export,
+    image_size: int = 224,
+    batch_size: int = 128,
+) -> tuple[dict[str, float], dict[str, float]]:
+    """Score every face. Returns (faceId -> score, faceId -> sigma).
+
+    Sigma dict is empty for checkpoints trained without a variance head.
+    """
     device = pick_device()
     ckpt = torch.load(checkpoint_path, map_location=device)
     cfg = TrainConfig(**ckpt["config"])
     backbone = cfg.backbone
     image_size = cfg.image_size
-    scorer = PreferenceScorer(backbone, pretrained=False).to(device)
+    scorer = PreferenceScorer(backbone, pretrained=False, variance_head=cfg.variance_head).to(
+        device
+    )
     # PairwiseModel stores weights under scorer.*
     state = {k.removeprefix("scorer."): v for k, v in ckpt["model"].items()}
     scorer.load_state_dict(state)
@@ -91,16 +110,25 @@ def score_all_faces(
 
     faces = [f for f in export.faces().values() if export.image_path(f).exists()]
     scores: dict[str, float] = {}
+    sigmas: dict[str, float] = {}
     for i in tqdm(range(0, len(faces), batch_size), desc="scoring faces"):
         batch = faces[i : i + batch_size]
         tensors = []
         for f in batch:
             with Image.open(export.image_path(f)) as img:
                 tensors.append(tf(img.convert("RGB")))
-        out = scorer(torch.stack(tensors).to(device))
-        for f, s in zip(batch, out.cpu().tolist()):
-            scores[f.face_id] = s
-    return scores
+        x = torch.stack(tensors).to(device)
+        if cfg.variance_head:
+            mu, log_var = scorer.forward_dist(x)
+            sigma = (log_var / 2).exp()
+            for f, s, sg in zip(batch, mu.cpu().tolist(), sigma.cpu().tolist()):
+                scores[f.face_id] = s
+                sigmas[f.face_id] = sg
+        else:
+            out = scorer(x)
+            for f, s in zip(batch, out.cpu().tolist()):
+                scores[f.face_id] = s
+    return scores, sigmas
 
 
 def rank_agreement_vs_bt(
