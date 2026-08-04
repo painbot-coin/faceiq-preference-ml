@@ -9,6 +9,24 @@ external/
 # votes-*.jsonl and pairs.json in the same dir ARE committed
 labels/pilot-500/sample-meta.json
 
+# Panel answer key + gold review sheet (thetas, VLM labels, expected winners).
+# pairs.json / golds.json / examples.json in the same dir ARE committed — those
+# are what ships to faceiq-rating.
+labels/panel-pilot/sample-meta.json
+labels/panel-pilot/golds-review.json
+# Same answer key for every later run: thetaA/thetaB, vlmOutcome, winProb, gold candidacy.
+labels/panel-run-*/sample-meta.json
+
+# Self-declared ethnicity joined from the Labs manifest — personal data about
+# real users, regenerable via scripts/join_face_attributes.py
+labels/face-attributes.json
+
+# Raw rater exports — carry Prolific participant ids (third-party personal data)
+# and are not regenerable, so they are backed up outside git, not committed.
+# Derived, de-identified analysis is what belongs in the research log.
+labels/panel-pilot/**/results/
+labels/panel-run-*/**/results/
+
 # Python
 .venv/
 venv/

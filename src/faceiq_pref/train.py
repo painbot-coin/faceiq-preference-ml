@@ -2,13 +2,25 @@
 
 Data flow: export dir -> face-id split -> PairDataset (loads photos lazily) ->
 BCE-with-logits on winner -> checkpoints/<run>/best.pt + artifacts/<run>/metrics.json.
+
+Set `panel_labels` in the config to replace the export's hard winner with a human vote share
+on the pairs our Prolific panel judged. That applies to the train split only — see the note
+in `train()` — so `val_accuracy` stays comparable across runs.
+
+**Checkpoint selection follows the humans, not the VLM.** `val_accuracy` is scored against the
+export's `finalOutcome`, which is a Gemini label on ~98% of rows, and research log §5.3.1 measured
+that a run can gain 2 points against real people while moving `val_accuracy` by 0.4 — the metric
+is structurally blind to the improvement these runs exist to produce. So when `panel_labels` is
+set, each epoch also scores the *val* split's panel pairs against real votes (`panel_val_accuracy`)
+and `best.pt` is chosen on that. `val_accuracy` is still computed and recorded, because it is the
+only figure comparable to the pre-panel runs.
 """
 
 from __future__ import annotations
 
 import json
 import time
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, fields
 from pathlib import Path
 
 import torch
@@ -21,6 +33,12 @@ from tqdm import tqdm
 from .backbones.arcface import is_arcface_backbone
 from .data import Export, Face, Matchup, split_by_face_id
 from .model import PairwiseModel, pick_device
+from .panel import load_panel_targets, load_panel_votes, load_rejects
+
+# Below this many leak-free val panel pairs the human-grounded metric is noisier than the
+# differences it would be selecting on, so selection falls back to `val_accuracy`. At
+# val_fraction 0.5 there are ~2,500; at 0.2 only ~450, which is thin but still usable.
+MIN_PANEL_VAL_PAIRS = 200
 
 IMAGENET_MEAN = [0.485, 0.456, 0.406]
 IMAGENET_STD = [0.229, 0.224, 0.225]
@@ -60,6 +78,17 @@ class TrainConfig:
     freeze_backbone: bool = False  # embedding probe: train only the head
     confidence_filter: str | None = None  # train only: high | medium | low (human labels kept)
     variance_head: bool = False  # UOL-style per-face Gaussian; probabilistic RankNet logit
+    # Human panel labels, applied to the TRAIN split only so val accuracy stays comparable
+    # to runs fitted on export labels. [[results_dir, sample_meta.json], ...]
+    panel_labels: list[list[str]] | None = None
+    panel_rejects: list[str] | None = None
+    panel_min_votes: int = 4  # pairs with thinner coverage keep their export label
+    panel_prior: float = 1.0  # Laplace count per side; stops 6-0 becoming a target of 1.0
+    panel_hard: bool = False  # ablation: keep the crowd's winner, discard the margin
+    # Loss multiplier on the ~13% of train pairs carrying a human target. The other 87% are
+    # still Gemini labels, blind spot included, so at weight 1.0 the human corrections are a
+    # minority vote against the very labels they exist to overrule.
+    panel_weight: float = 1.0
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> "TrainConfig":
@@ -67,6 +96,30 @@ class TrainConfig:
 
         raw = yaml.safe_load(Path(path).read_text())
         return cls(**raw)
+
+    @classmethod
+    def from_saved(cls, raw: dict) -> "TrainConfig":
+        """Rebuild from a checkpoint's stored config, tolerating field drift.
+
+        `TrainConfig(**ckpt["config"])` raises on any key this class no longer has — so a
+        checkpoint trained after a field was added cannot be loaded by older code at all,
+        which is how the dashboard died on `variance_head`. Unknown keys are dropped with a
+        warning instead. That is safe for load-bearing keys because dropping one that
+        changes architecture (e.g. `variance_head`) makes `load_state_dict` fail loudly
+        right afterwards; it is silence about *cosmetic* keys that we actually want.
+        """
+        import warnings
+
+        known = {f.name for f in fields(cls)}
+        unknown = sorted(set(raw) - known)
+        if unknown:
+            warnings.warn(
+                f"checkpoint config has {len(unknown)} field(s) this build does not know "
+                f"({', '.join(unknown)}); ignoring them. If the checkpoint is newer than "
+                f"the code, pull the latest src/faceiq_pref before trusting results.",
+                stacklevel=2,
+            )
+        return cls(**{k: v for k, v in raw.items() if k in known})
 
 
 class PairDataset(Dataset):
@@ -78,11 +131,15 @@ class PairDataset(Dataset):
         backbone: str,
         image_size: int,
         augment: bool,
+        targets: dict[int, float] | None = None,
+        target_weight: float = 1.0,
     ):
         self.rows = matchups
         self.faces = faces
         self.export = export
         self.tf = build_transforms(backbone, image_size, augment)
+        self.targets = targets or {}
+        self.target_weight = target_weight
 
     def __len__(self) -> int:
         return len(self.rows)
@@ -94,8 +151,18 @@ class PairDataset(Dataset):
 
     def __getitem__(self, idx: int):
         m = self.rows[idx]
-        label = 1.0 if m.final_outcome == "A" else 0.0 if m.final_outcome == "B" else 0.5
-        return self._load(m.face_a_id), self._load(m.face_b_id), torch.tensor(label)
+        # A human vote share, where the panel covered this pair, beats the export's winner:
+        # it says which face and by how much. Everything else keeps the export label.
+        label = self.targets.get(m.pair_index)
+        weight = self.target_weight if label is not None else 1.0
+        if label is None:
+            label = 1.0 if m.final_outcome == "A" else 0.0 if m.final_outcome == "B" else 0.5
+        return (
+            self._load(m.face_a_id),
+            self._load(m.face_b_id),
+            torch.tensor(float(label)),
+            torch.tensor(float(weight)),
+        )
 
 
 def _apply_confidence_filter(rows: list[Matchup], floor: str) -> list[Matchup]:
@@ -127,13 +194,47 @@ def evaluate(model: PairwiseModel, loader: DataLoader, device: torch.device) -> 
     model.eval()
     criterion = nn.BCEWithLogitsLoss()
     total_loss, correct, seen = 0.0, 0, 0
-    for a, b, y in loader:
+    # Validation is deliberately unweighted: val keeps export labels, and weighting it too
+    # would make val_loss incomparable across runs for no benefit.
+    for a, b, y, _w in loader:
         a, b, y = a.to(device), b.to(device), y.to(device)
         logits = model(a, b)
         total_loss += criterion(logits, y).item() * len(y)
         correct += ((logits > 0) == (y > 0.5)).sum().item()
         seen += len(y)
     return {"loss": total_loss / max(seen, 1), "accuracy": correct / max(seen, 1)}
+
+
+@torch.no_grad()
+def panel_agreement(
+    model: PairwiseModel,
+    loader: DataLoader,
+    device: torch.device,
+    rows: list[Matchup],
+    votes: dict[int, tuple[float, float]],
+) -> float:
+    """Share of individual human votes agreeing with the model's pick, on val pairs.
+
+    The same quantity `scripts/eval_vs_panel.py` reports, computed inline so it can drive
+    checkpoint selection. Vote-weighted rather than pair-weighted on purpose: a pair the crowd
+    split 7-5 should contribute less to the score than one it called 11-1, and weighting by
+    ballots does that automatically.
+
+    `loader` must be unshuffled over `rows` so batch order lines up with the vote table. The
+    sign of the pairwise logit is the model's preference for face A under both the plain and
+    the variance head, so no separate scoring pass is needed.
+    """
+    model.eval()
+    agree = total = 0.0
+    i = 0
+    for a, b, _y, _w in loader:
+        picks_a = (model(a.to(device), b.to(device)) > 0).tolist()
+        for prefers_a in picks_a:
+            wa, wb = votes[rows[i].pair_index]
+            agree += wa if prefers_a else wb
+            total += wa + wb
+            i += 1
+    return agree / total if total else float("nan")
 
 
 def train(export: Export, cfg: TrainConfig) -> dict:
@@ -154,12 +255,82 @@ def train(export: Export, cfg: TrainConfig) -> dict:
     train_rows = _filter_rows(train_rows, faces, export, cfg)
     val_rows = _filter_rows(val_rows, faces, export, cfg)
 
-    train_ds = PairDataset(train_rows, faces, export, cfg.backbone, cfg.image_size, cfg.augment)
+    # Panel targets go on the train split only. Rewriting val labels too would move the
+    # yardstick and the model in the same experiment, leaving val accuracy uninterpretable;
+    # `scripts/eval_vs_panel.py` is how a checkpoint gets measured against humans, and it
+    # only scores pairs whose faces this run held out.
+    targets: dict[int, float] = {}
+    if cfg.panel_labels:
+        panels = [(r, m) for r, m in cfg.panel_labels]
+        targets = load_panel_targets(
+            panels,
+            load_rejects(cfg.panel_rejects),
+            min_votes=cfg.panel_min_votes,
+            prior=cfg.panel_prior,
+            hard=cfg.panel_hard,
+        )
+        hit = [m for m in train_rows if m.pair_index in targets]
+        soft = sum(1 for m in hit if 0.35 < targets[m.pair_index] < 0.65)
+        flipped = sum(
+            1
+            for m in hit
+            if m.final_outcome in ("A", "B")
+            and (targets[m.pair_index] > 0.5) != (m.final_outcome == "A")
+        )
+        print(
+            f"panel targets: {len(targets):,} pairs have >= {cfg.panel_min_votes} votes; "
+            f"{len(hit):,} of {len(train_rows):,} train pairs ({len(hit) / len(train_rows):.1%}) "
+            f"take one"
+        )
+        print(
+            f"  of those, {soft:,} land near 0.5 (the crowd was split) and "
+            f"{flipped:,} disagree with the export winner"
+        )
+        val_hit = sum(1 for m in val_rows if m.pair_index in targets)
+        print(f"  val split keeps export labels throughout ({val_hit:,} panel pairs untouched)")
+
+    # Human-grounded validation. These are val-split pairs, so no face here was trained on and
+    # no vote here entered the loss — the same leak guard `eval_vs_panel.py` applies, just
+    # computed every epoch so it can pick the checkpoint.
+    panel_val_rows: list[Matchup] = []
+    panel_votes: dict[int, tuple[float, float]] = {}
+    if cfg.panel_labels:
+        panel_votes = load_panel_votes(
+            [(r, m) for r, m in cfg.panel_labels], load_rejects(cfg.panel_rejects)
+        )
+        panel_val_rows = [
+            m for m in val_rows
+            if sum(panel_votes.get(m.pair_index, (0.0, 0.0))) >= cfg.panel_min_votes
+        ]
+        n_votes = sum(sum(panel_votes[m.pair_index]) for m in panel_val_rows)
+        selecting = len(panel_val_rows) >= MIN_PANEL_VAL_PAIRS
+        print(
+            f"  human-grounded val: {len(panel_val_rows):,} leak-free panel pairs "
+            f"({n_votes:,.0f} votes) -> "
+            + ("best.pt is selected on THIS, not val_accuracy"
+               if selecting else
+               f"too few (< {MIN_PANEL_VAL_PAIRS}); falling back to val_accuracy")
+        )
+
+    train_ds = PairDataset(
+        train_rows, faces, export, cfg.backbone, cfg.image_size, cfg.augment,
+        targets=targets, target_weight=cfg.panel_weight,
+    )
     val_ds = PairDataset(val_rows, faces, export, cfg.backbone, cfg.image_size, augment=False)
     train_dl = DataLoader(
         train_ds, cfg.batch_size, shuffle=True, num_workers=cfg.num_workers, pin_memory=True
     )
     val_dl = DataLoader(val_ds, cfg.batch_size, num_workers=cfg.num_workers, pin_memory=True)
+    panel_dl = None
+    if panel_val_rows:
+        panel_ds = PairDataset(
+            panel_val_rows, faces, export, cfg.backbone, cfg.image_size, augment=False
+        )
+        # shuffle=False is load-bearing: panel_agreement() walks batches in row order.
+        panel_dl = DataLoader(
+            panel_ds, cfg.batch_size, shuffle=False, num_workers=cfg.num_workers,
+            pin_memory=True,
+        )
 
     model = PairwiseModel(cfg.backbone, variance_head=cfg.variance_head).to(device)
     if cfg.freeze_backbone:
@@ -168,23 +339,32 @@ def train(export: Export, cfg: TrainConfig) -> dict:
         model.scorer.backbone.eval()
     trainable = [p for p in model.parameters() if p.requires_grad]
     optimizer = torch.optim.AdamW(trainable, lr=cfg.lr, weight_decay=cfg.weight_decay)
-    criterion = nn.BCEWithLogitsLoss()
+    # reduction="none" so per-sample panel weights can be applied; the weighted mean below
+    # keeps train_loss on the same scale as an unweighted run.
+    criterion = nn.BCEWithLogitsLoss(reduction="none")
 
     ckpt_dir = Path("checkpoints") / cfg.run_name
     art_dir = Path("artifacts") / cfg.run_name
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     art_dir.mkdir(parents=True, exist_ok=True)
 
-    history, best_acc = [], 0.0
+    # Which number decides `best.pt`. `val_accuracy` is scored against Gemini's labels, so on a
+    # panel run it cannot see the improvement being trained for; prefer the human-grounded metric
+    # whenever there are enough leak-free pairs to trust it.
+    select_on = ("panel_val_accuracy"
+                 if panel_dl is not None and len(panel_val_rows) >= MIN_PANEL_VAL_PAIRS
+                 else "val_accuracy")
+
+    history, best_score, best_epoch = [], -1.0, 0
     for epoch in range(1, cfg.epochs + 1):
         model.train()
         if cfg.freeze_backbone:
             model.scorer.backbone.eval()
         running, seen = 0.0, 0
-        for a, b, y in tqdm(train_dl, desc=f"epoch {epoch}/{cfg.epochs}"):
-            a, b, y = a.to(device), b.to(device), y.to(device)
+        for a, b, y, w in tqdm(train_dl, desc=f"epoch {epoch}/{cfg.epochs}"):
+            a, b, y, w = a.to(device), b.to(device), y.to(device), w.to(device)
             optimizer.zero_grad()
-            loss = criterion(model(a, b), y)
+            loss = (criterion(model(a, b), y) * w).sum() / w.sum()
             loss.backward()
             optimizer.step()
             running += loss.item() * len(y)
@@ -198,15 +378,22 @@ def train(export: Export, cfg: TrainConfig) -> dict:
             "val_accuracy": val["accuracy"],
             "time": time.time(),
         }
+        if panel_dl is not None:
+            row["panel_val_accuracy"] = panel_agreement(
+                model, panel_dl, device, panel_val_rows, panel_votes
+            )
         history.append(row)
-        print(
-            f"epoch {epoch}: train_loss={row['train_loss']:.4f} "
-            f"val_loss={val['loss']:.4f} val_acc={val['accuracy']:.4f}"
-        )
-        if val["accuracy"] > best_acc:
-            best_acc = val["accuracy"]
+        line = (f"epoch {epoch}: train_loss={row['train_loss']:.4f} "
+                f"val_loss={val['loss']:.4f} val_acc={val['accuracy']:.4f}")
+        if "panel_val_accuracy" in row:
+            line += f" panel_val_acc={row['panel_val_accuracy']:.4f}"
+        print(line + (f"  <- best on {select_on}" if row[select_on] > best_score else ""))
+
+        if row[select_on] > best_score:
+            best_score, best_epoch = row[select_on], epoch
             torch.save(
-                {"model": model.state_dict(), "config": asdict(cfg), "epoch": epoch},
+                {"model": model.state_dict(), "config": asdict(cfg), "epoch": epoch,
+                 "selected_on": select_on, "selected_score": best_score},
                 ckpt_dir / "best.pt",
             )
 
@@ -215,9 +402,19 @@ def train(export: Export, cfg: TrainConfig) -> dict:
             "device": str(device),
             "train_pairs": len(train_rows),
             "val_pairs": len(val_rows),
-            "best_val_accuracy": best_acc,
+            "panel_target_pairs": sum(1 for m in train_rows if m.pair_index in targets),
+            "panel_val_pairs": len(panel_val_rows),
+            "panel_weight": cfg.panel_weight,
+            "selected_on": select_on,
+            "selected_epoch": best_epoch,
+            "best_val_accuracy": max(r["val_accuracy"] for r in history),
+            "best_panel_val_accuracy": max(
+                (r["panel_val_accuracy"] for r in history if "panel_val_accuracy" in r),
+                default=None,
+            ),
             "history": history,
         }
         (art_dir / "metrics.json").write_text(json.dumps(metrics, indent=2))
 
+    print(f"checkpoint: epoch {best_epoch}, selected on {select_on} = {best_score:.4f}")
     return metrics

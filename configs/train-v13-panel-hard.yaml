@@ -1,0 +1,42 @@
+# Ablation arm: the crowd's winner, without the crowd's margin.
+#
+# Identical to train-v12-panel-soft.yaml except `panel_hard: true`, which rounds every panel
+# target back to 0 or 1. Running both arms separates the two things we changed at once:
+#
+#   train-v10 (control)  export label            -> 54.29% against human votes
+#   train-v13 (this)     crowd winner, hard 0/1  -> does fixing WHICH face help?
+#   train-v12            crowd vote share        -> does admitting HOW MUCH help on top?
+#
+# Worth running because the hard arm might lose to the control. On pairs under a 10-point gap
+# the crowd majority disagrees with the export label 46.7% of the time — near a coin flip —
+# so this arm swaps one noisy binary for another while still claiming certainty. If v13 lands
+# at or below v10 and v12 beats both, the value was in the margin, not the winner, and every
+# future study should be scored on vote share rather than majority.
+#
+# Run: python scripts/train.py --config configs/train-v13-panel-hard.yaml
+
+export_dir: data/exports/cmr1mr0m7000196d57zi3vcgn
+run_name: train-v13-panel-hard
+
+backbone: arcface_r50
+freeze_backbone: false
+image_size: 112
+batch_size: 32
+epochs: 10
+lr: 0.00001
+weight_decay: 0.0001
+
+val_fraction: 0.5
+split_seed: 42
+num_workers: 4
+skip_ties: true
+augment: true
+
+panel_labels:
+  - [labels/panel-pilot/results, labels/panel-pilot/sample-meta.json]
+  - [labels/panel-run-3/results, labels/panel-run-3/sample-meta.json]
+panel_rejects:
+  - artifacts/panel-run-v1/reject-pids.txt
+  - artifacts/panel-run-v3/reject-pids.txt
+panel_min_votes: 4
+panel_hard: true

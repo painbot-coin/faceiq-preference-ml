@@ -1,0 +1,62 @@
+# All three panel runs in the loss, on the SOFT (vote-share) target.
+#
+# Two things changed from train-v12-panel-soft, and only two:
+#
+#   1. run 4's 2,500 uniform pairs join panel_labels. Panel coverage of the train split goes
+#      14.7% -> 19.5% (1,927 -> 2,561 pairs), and the leak-free eval set grows 1,928 -> 2,559
+#      pairs, which is a 33% power gain on the metric that gates every future run.
+#   2. panel_rejects gains run 4's list.
+#
+# Held fixed so v12 is the exact control: backbone, image size, batch, epochs, lr, weight
+# decay, val_fraction, split_seed, panel_min_votes, panel_prior, and the soft target.
+#
+# Why soft and not hard, reversing the 2026-08-01 decision. That decision was made on
+# deliberately-hard pairs, where v13 (hard) beat v12 (soft) by +0.59 pts inside its own CI.
+# Scored on run 4's *population* sample the order flips and separates: v12 67.67%, v13 66.93%,
+# v10 control 66.47%, and v12 - control is +1.20 pts [+0.04, +2.35]. Run 4's pairs are mostly
+# decisive, so their vote shares sit far from 0.5 and carry exactly the margin information a
+# hard 0/1 target throws away. Rounding a 11-1 split and a 7-5 split to the same target is the
+# specific loss this arm avoids.
+#
+# What this arm is expected to fix, and what it is not. Log §5.8 measured the comparator at
+# 66.9-67.7% on a population sample where the VLM-only ranking scores 69.5% and the crowd
+# ceiling is 69.9% — the network is a *lossy* copy of the ordering it was distilled from, and
+# it loses in the 10-45 percentile band while winning under 10. Run 4's votes are concentrated
+# in the wide bands, so this is the first training set that supervises the region where the
+# network is weakest. If v16 does not close that band, the deficit is capacity or schedule, not
+# labels, and no further panel spend will fix it.
+#
+# Run: python scripts/train.py --config configs/train-v16-panel-run4.yaml   (GPU, ~25 min)
+# Then: python scripts/eval_vs_panel.py --checkpoint checkpoints/train-v16-panel-run4/best.pt
+#           --panel labels/panel-run-4-random/results labels/panel-run-4-random/sample-meta.json
+#           --ratings artifacts/bt-refit-v2-qc/ratings.csv ...
+#       and compare_panel_evals.py against artifacts/train-v12-panel-soft/panel-pairs-run4.csv.
+
+export_dir: data/exports/cmr1mr0m7000196d57zi3vcgn
+run_name: train-v16-panel-run4
+
+backbone: arcface_r50
+freeze_backbone: false
+image_size: 112
+batch_size: 32
+epochs: 10
+lr: 0.00001
+weight_decay: 0.0001
+
+val_fraction: 0.5
+split_seed: 42
+num_workers: 4
+skip_ties: true
+augment: true
+
+panel_labels:
+  - [labels/panel-pilot/results, labels/panel-pilot/sample-meta.json]
+  - [labels/panel-run-3/results, labels/panel-run-3/sample-meta.json]
+  - [labels/panel-run-4-random/results, labels/panel-run-4-random/sample-meta.json]
+panel_rejects:
+  - artifacts/panel-run-v1/reject-pids.txt
+  - artifacts/panel-run-v3/reject-pids.txt
+  - artifacts/panel-run-v4/reject-pids.txt
+panel_min_votes: 4
+panel_prior: 1.0
+panel_hard: false

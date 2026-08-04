@@ -1,7 +1,22 @@
 # Human panel pilot — plan & decision framework
 
-**Status:** Draft (2026-07-14). Not started. Drafted in faceiq-preference-ml; copy to
-faceiq-labs `docs/research/` if adopted (that copy becomes canonical, per repo convention).
+**Status:** ✅ **Executed and superseded** (drafted 2026-07-14; three runs completed 2026-07-29 → 08-01).
+Kept as the historical record of *why* we decided to buy human labels and what we pre-registered before
+seeing any data — useful when writing up, and the honest reference for which predictions held.
+
+**Read these instead for anything current:**
+
+| For | Read |
+|---|---|
+| Results and what they mean | `panel-pilot-findings.md`, and `scoring-gt-research-log.md` §5.5 (canonical) |
+| How to run the next study | `panel-study-playbook.md` |
+| Operational detail, per-run outcomes, bugs | `panel-pilot-runbook.md` |
+| Prolific form fields | `prolific-soft-launch-form.md` |
+
+**Two of this doc's framing assumptions turned out to be wrong**, recorded here rather than edited away:
+the human ceiling on close pairs is ~59%, not the ~85% guessed in §1.1 below, so the model was *not* near
+a recoverable ceiling; and majority agreement turned out to be the wrong statistic entirely — the signal
+is in the vote *share*.
 
 **Purpose:** decide — for a few thousand dollars instead of tens of thousands — whether
 the current VLM-labeled pipeline (Gemini Flash pairwise labels → BT → neural comparator)

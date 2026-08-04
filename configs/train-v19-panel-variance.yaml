@@ -1,0 +1,59 @@
+# Let the network say how sure it is: per-face sigma, and a band that depends on the photo.
+#
+# `variance_head` scores each face as N(mu, sigma^2) instead of a point, and the pairwise logit
+# becomes (mu_A - mu_B) / sqrt(1 + var_A + var_B). The constant 1 is the standard RankNet noise
+# floor, so the model can only ever *add* uncertainty on top of the point-score baseline — it
+# cannot cheat by shrinking its way to confidence.
+#
+# This has been fully implemented since before the panel existed (`model.py`, `train.py`,
+# `eval.py`, plus configs/train-v11-arcface-variance.yaml) and has **never been run**. v11
+# predates `panel_labels`, so this is v11's idea against human targets and the current selection
+# metric — otherwise identical to train-v17.
+#
+# Two things it could buy, and they are different:
+#
+# 1. **Accuracy on the mid-gap band.** A pair the crowd split 7-5 currently pushes the same
+#    gradient as one it called 11-1 up to the target value; with a variance head the model can
+#    represent "these two are both uncertain" instead of forcing a confident margin. That is a
+#    plausible mechanism for the 10-45 deficit in log §5.8, though an untested one.
+# 2. **A per-photo band, which nothing else in the programme can produce.** The disagreement band
+#    (`scripts/band_calibration.py`, T = 1.920) is a property of the *scale* — everyone gets the
+#    same width. sigma here is a property of *this image*, so a blurry or badly-lit upload would
+#    widen its own band. That is the honest version of "a margin of error based on photo quality",
+#    and it is the only component multi-photo averaging can shrink.
+#
+# Check before trusting a win: sigma must actually vary across faces. If the head collapses to a
+# constant it has learned nothing and the accuracy difference is noise. `eval.py`'s
+# `forward_dist` returns per-face sigma; look at its spread before reading anything into it.
+#
+# Run: FACEIQ_ARMS="train-v19-panel-variance" scripts/sync_panel_to_gpu.sh <ip>
+
+export_dir: data/exports/cmr1mr0m7000196d57zi3vcgn
+run_name: train-v19-panel-variance
+
+backbone: arcface_r50
+freeze_backbone: false
+variance_head: true
+image_size: 112
+batch_size: 32
+epochs: 10
+lr: 0.00001
+weight_decay: 0.0001
+
+val_fraction: 0.5
+split_seed: 42
+num_workers: 4
+skip_ties: true
+augment: true
+
+panel_labels:
+  - [labels/panel-pilot/results, labels/panel-pilot/sample-meta.json]
+  - [labels/panel-run-3/results, labels/panel-run-3/sample-meta.json]
+  - [labels/panel-run-4-random/results, labels/panel-run-4-random/sample-meta.json]
+panel_rejects:
+  - artifacts/panel-run-v1/reject-pids.txt
+  - artifacts/panel-run-v3/reject-pids.txt
+  - artifacts/panel-run-v4/reject-pids.txt
+panel_min_votes: 4
+panel_prior: 1.0
+panel_hard: false

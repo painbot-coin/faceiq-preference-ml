@@ -1,0 +1,51 @@
+# Does the human signal need to be louder than the machine signal?
+#
+# The diagnosis behind this arm: only 13% of train pairs carry a human target, and the other
+# 87% are Gemini labels *including the blind spot the panel exists to correct*. At weight 1.0
+# the 796 flipped winners are a minority vote against ~12k rows that assert the opposite
+# pattern on similar-looking faces. Upweighting them tests whether the +2.13 pts train-v13
+# gained is capped by how quiet the human signal is, rather than by how much of it we own.
+#
+# This is the one change from train-v13. Held fixed: backbone, image size, batch, epochs, lr,
+# weight decay, split fraction, split seed, and panel_hard. So v13 is the control.
+#
+# Deliberately NOT run at the ship split of 0.2. At 0.2 only 298 panel pairs are leak-free,
+# which cannot resolve a 1-2 point difference; at 0.5 there are 1,756 and the result is
+# directly comparable to v13's 56.42% on the identical pair set. Measure here, ship at 0.2
+# afterwards if it wins.
+#
+# Weight 3.0 raises the human share of the loss from ~13% to ~31%. Chosen rather than
+# something larger because the corrections are concentrated on hard pairs, where the target
+# is genuinely near 0.5 and the gradient is legitimately weak — pushing too hard would just
+# fit noise in the crowd's margin. If 3.0 shows a clear gain, 6.0 is the obvious follow-up;
+# if it shows a clear loss, the human signal is already loud enough and this line is closed.
+#
+# Run: python scripts/train.py --config configs/train-v15-panel-weighted.yaml
+
+export_dir: data/exports/cmr1mr0m7000196d57zi3vcgn
+run_name: train-v15-panel-weighted
+
+backbone: arcface_r50
+freeze_backbone: false
+image_size: 112
+batch_size: 32
+epochs: 10
+lr: 0.00001
+weight_decay: 0.0001
+
+val_fraction: 0.5
+split_seed: 42
+num_workers: 4
+skip_ties: true
+augment: true
+
+panel_labels:
+  - [labels/panel-pilot/results, labels/panel-pilot/sample-meta.json]
+  - [labels/panel-run-3/results, labels/panel-run-3/sample-meta.json]
+panel_rejects:
+  - artifacts/panel-run-v1/reject-pids.txt
+  - artifacts/panel-run-v3/reject-pids.txt
+panel_min_votes: 4
+panel_prior: 1.0
+panel_hard: true
+panel_weight: 3.0

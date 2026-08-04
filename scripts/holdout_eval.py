@@ -60,7 +60,7 @@ def main() -> int:
 
     device = pick_device()
     ckpt = torch.load(args.checkpoint, map_location=device)
-    cfg = TrainConfig(**ckpt["config"])
+    cfg = TrainConfig.from_saved(ckpt["config"])
     export = load_export(args.export or cfg.export_dir)
     print(f"export OK: run {export.run_id} — holdout eval for {cfg.run_name!r}")
 

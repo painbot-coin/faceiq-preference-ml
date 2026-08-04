@@ -35,6 +35,18 @@ def main() -> int:
         help="only keep VLM-labeled pairs at this confidence or better (human-audited pairs always kept)",
     )
     ap.add_argument("--skip-stability", action="store_true", help="skip 80%% subsample check (slow)")
+    ap.add_argument(
+        "--exclude-faces",
+        help="CSV with a faceId column (e.g. artifacts/face-qc-v1/exclude-faces.csv). "
+        "Drops every matchup touching those faces, so a cleaned refit can be run "
+        "before the labs-side exclusions are applied and re-exported.",
+    )
+    ap.add_argument(
+        "--exclude-genders",
+        help="CSV with a faceId column of gender relabels (gender-fixes.csv). Their "
+        "existing matchups were generated within the wrong gender, so they are "
+        "dropped too.",
+    )
     args = ap.parse_args()
 
     export = load_export(args.export)
@@ -55,6 +67,23 @@ def main() -> int:
         ]
         print(f"confidence filter >= {args.confidence}: {before} -> {len(matchups)}")
 
+    dropped_faces: set[str] = set()
+    for path in (args.exclude_faces, args.exclude_genders):
+        if path:
+            with open(path, newline="") as fh:
+                dropped_faces.update(row["faceId"] for row in csv.DictReader(fh))
+    if dropped_faces:
+        before = len(matchups)
+        matchups = [
+            m
+            for m in matchups
+            if m.face_a_id not in dropped_faces and m.face_b_id not in dropped_faces
+        ]
+        print(
+            f"QC exclusions: {len(dropped_faces)} faces -> dropped "
+            f"{before - len(matchups)} matchups ({before} -> {len(matchups)})"
+        )
+
     faces = export.faces()
     genders = sorted({m.gender for m in matchups})
     out_dir = Path(args.out)
@@ -66,6 +95,7 @@ def main() -> int:
         "refitAt": datetime.now(timezone.utc).isoformat(),
         "matchupsUsed": len(matchups),
         "confidenceFilter": args.confidence,
+        "qcExcludedFaces": len(dropped_faces),
         "tieRule": "half-win each side (0.5)",
         "calibrationAnchors": ANCHORS,
         "genders": {},

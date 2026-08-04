@@ -28,6 +28,9 @@ arcface = [
     "onnxruntime>=1.16",
     "onnx2torch>=1.5",
 ]
+vlm = [
+    "google-genai>=1.0",  # scripts/qc_faces.py — Step 0 face metadata QC
+]
 
 [build-system]
 requires = ["setuptools>=68"]

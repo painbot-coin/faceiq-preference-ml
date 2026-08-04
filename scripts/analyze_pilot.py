@@ -93,7 +93,7 @@ def score_faces_with_model(checkpoint: Path, export, face_ids: set[str]) -> dict
 
     device = pick_device()
     ckpt = torch.load(checkpoint, map_location=device)
-    cfg = TrainConfig(**ckpt["config"])
+    cfg = TrainConfig.from_saved(ckpt["config"])
     scorer = PreferenceScorer(cfg.backbone, pretrained=False).to(device)
     scorer.load_state_dict({k.removeprefix("scorer."): v for k, v in ckpt["model"].items()})
     scorer.eval()

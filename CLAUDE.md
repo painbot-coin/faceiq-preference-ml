@@ -52,6 +52,15 @@ they match. Training and BT must consume `finalOutcome` only.
   hashes/counts and fails loudly on corrupt or partial exports.
 - BT acceptance gates (research log §5.1): comparison graph connected, no face with
   <15 resolved comparisons, 80% subsample Spearman rho > 0.95.
+- **Never cut bands, strata or pair draws on a ranking that has seen the votes being analysed**
+  (log §5.7 — doing it on `bt-refit-v4-panel` inverted the headroom table and would have sent $8.8k
+  at the worst band). Band cuts use `bt-refit-v2-qc`, which predates every human vote.
+- **Never quote an accuracy without its pair distribution** (log §5.8). The same ranking scores
+  51.5% on near-ties and 81.5% on a uniform draw. Say which.
+- Pass `--exclude-faces artifacts/face-qc-v1/exclude-faces.csv --exclude-genders
+  artifacts/face-qc-v1/gender-fixes.csv` to `refit_bt_panel.py`. It has **no defaults**, and without
+  them it silently ranks 2,999 faces instead of 2,866 while still passing every gate — check
+  `qcExcludedFaces` in `metrics.json` reads 133.
 
 ## Commands
 
@@ -63,18 +72,53 @@ streamlit run app/dashboard.py --server.port 8502                               
 pytest                                                                     # tests
 ```
 
+Ranking of record is **`artifacts/bt-refit-v5-panel`** (all four panel runs: 10,280 pairs, 95,245
+votes, 963 raters). `refit_bt_panel.py` produces it; `run_bt.py` is the VLM-labels-only path.
+
 ## Where results go
 
 | Output | Location |
 |--------|----------|
 | BT refit (theta, /10, diagnostics) | `artifacts/bt-refit-vN/` (`ratings.csv`, `metrics.json`) |
 | Training runs | `artifacts/train-vN/metrics.json` + `checkpoints/train-vN/*.pt` |
-| Decisions + summary numbers | `docs/research/scoring-gt-research-log.md` §5 — **in faceiq-labs** (canonical); local copy is reference only |
+| Panel study analysis | `artifacts/panel-run-vN/` (rater QC, reject lists, per-band accuracy, calibration) |
+| Human-grounded model eval | `artifacts/train-vN/panel-eval*.json` + `panel-pairs*.csv` — **not** `val_accuracy`, which keeps the VLM labels and cannot see the improvement |
+| Decisions + summary numbers | `docs/research/scoring-gt-research-log.md` §5 — **this repo's copy is now canonical**, see below |
 
-## Reference docs (copied from faceiq-labs — canonical copies live there)
+## Docs
 
-- `docs/research/scoring-gt-training.md` — this repo's charter
-- `docs/research/scoring-gt-core.md` — §6-§8 BT, calibration, training methodology
-- `docs/research/scoring-gt-research-log.md` — results so far; §5 is what we fill next
+**Start at `docs/research/README.md`** — current state, what is unknown, priority order.
+
+⚠️ **The research log in *this* repo is the live record.** An older note said the canonical copy
+lived in faceiq-labs; that is no longer true and following it loses work. As of 2026-08-04 the
+faceiq-labs copy is **1,188 lines last touched 2026-07-25**, missing §5.5 (human panel, 4 runs,
+95,245 votes), §5.6 (rating validation), §5.7 (label information) and §5.8 (population accuracy,
+honest calibration, the spend verdict) — over 1,000 lines and every decision since. Write here. Sync
+to faceiq-labs deliberately, as a publish step, not by assuming it is ahead.
+
+**Current state in one line (2026-08-04):** the labelling programme is finished — $14,367 of planned
+spend was cancelled on measurement, and the bottleneck is the neural comparator, which is 1.8–2.1
+points *behind* the ranking it was distilled from on typical pairs. `train-v16` then added run 4's
+wide-band votes and **changed nothing in the weak band**, confirming this is an extraction failure
+rather than a data shortage. Next actions, none needing new labels: fix checkpoint selection (it uses
+`val_accuracy`, scored against Gemini, which cannot see the improvement), try 224 px, and measure a
+gap-routed ensemble.
+
+- `docs/research/README.md` — **entry point**; live-doc index and priorities
+- `docs/research/scoring-gt-research-log.md` — the lab notebook; **§5.8 (run 4) is the newest finding**
+- `docs/research/programme-direction-review.md` — strategy: is the approach working, when to stop
+  labelling, plan B, and the maths behind rating *bands*. Read before committing money
+- `docs/research/scoring-gt-training.md` — this repo's charter and ML checklist
+- `docs/research/scoring-gt-core.md` — §6-§8 BT, calibration, training methodology (reference)
+- `docs/research/panel-study-playbook.md` — labelling policy; §2a is the buy/skip band table, §2c is
+  the proof the bands are not circular
+- `docs/research/prolific-soft-launch-form.md` — Prolific fill sheet, one section per run; §9.5 has
+  the full pull-and-analyse command sequence
+- `docs/research/panel-pilot-runbook.md` — study ops, draw → ship → deploy → monitor → archive
+- `docs/research/panel-pilot-findings.md` — panel results, runs 1–4 (the run-4 addendum is the
+  population-accuracy story)
+- `docs/research/archive/` — superseded plans and closed sub-studies; read its README first
+- `docs/ops/aws-gpu-training-setup.md` — EC2 GPU training (current; `scripts/sync_panel_to_gpu.sh`
+  automates most of it)
 - `.cursor/skills/bt-refit/` and `.cursor/skills/preference-training/` — step-by-step
   methodology for the two main jobs

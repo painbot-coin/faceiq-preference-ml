@@ -1,0 +1,52 @@
+# Human panel vote shares as soft training targets.
+#
+# This is train-v10-arcface-val50.yaml with ONE thing changed: where the train split's
+# labels come from. Everything else — backbone, image size, batch, epochs, lr, weight decay,
+# split fraction, split seed — is byte-identical, which makes train-v10 an exact control we
+# have already paid for (77.07% val, 54.29% against human votes).
+#
+# val_fraction stays at 0.5 because that is what makes the human-grounded test set usable:
+# 1,934 panel pairs have BOTH faces held out at 0.5, versus only 333 at 0.2. The price is
+# training on 13.1k pairs instead of 33.5k, so absolute accuracy here is NOT the shippable
+# number — it is a controlled comparison. Refit the winner at 0.2 for the model we ship.
+#
+# Expect train_loss to rise versus v10 and mean nothing by it: a soft target of 0.65 has a
+# minimum achievable BCE of 0.647, so the loss floor is no longer zero. val_loss and
+# val_accuracy stay comparable because the val split keeps its export labels.
+#
+# Run: python scripts/train.py --config configs/train-v12-panel-soft.yaml
+# Then: python scripts/eval_vs_panel.py --checkpoint checkpoints/train-v12-panel-soft/best.pt ...
+
+export_dir: data/exports/cmr1mr0m7000196d57zi3vcgn
+run_name: train-v12-panel-soft
+
+backbone: arcface_r50
+freeze_backbone: false
+image_size: 112
+batch_size: 32
+epochs: 10
+lr: 0.00001
+weight_decay: 0.0001
+
+val_fraction: 0.5
+split_seed: 42
+num_workers: 4
+augment: true
+
+# skip_ties stays true, and it is NOT what "stop dropping ties" meant. It drops rows whose
+# *export* label is literally "tie", and Gemini almost never emits one: 23 of 13,136 train
+# rows, 15 of which the panel also covered — 0.8% of the panel targets. The near-ties that
+# actually mattered were never dropped, they were recorded as confident wins; a 7-5 split came
+# through as a hard 1.0. That is what the soft targets fix, by giving 990 train pairs a target
+# near 0.5. Flipping this flag would cost the exact-control property for 15 pairs.
+skip_ties: true
+
+# 65,894 votes from 667 raters across studies 2 and 3, pooled on pairIndex.
+panel_labels:
+  - [labels/panel-pilot/results, labels/panel-pilot/sample-meta.json]
+  - [labels/panel-run-3/results, labels/panel-run-3/sample-meta.json]
+panel_rejects:
+  - artifacts/panel-run-v1/reject-pids.txt
+  - artifacts/panel-run-v3/reject-pids.txt
+panel_min_votes: 4
+panel_prior: 1.0

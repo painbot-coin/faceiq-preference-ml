@@ -1,0 +1,50 @@
+# train-v16, rerun with the checkpoint chosen on humans instead of on Gemini.
+#
+# Byte-identical to configs/train-v16-panel-run4.yaml except `run_name`. The change is in
+# `src/faceiq_pref/train.py`, not here: `best.pt` is now selected on `panel_val_accuracy` (the
+# share of real human votes the model agrees with, on val-split panel pairs) rather than on
+# `val_accuracy` (agreement with the export's Gemini labels).
+#
+# Why this is its own arm rather than a footnote. Log §5.3.1 measured a run gaining 2 points
+# against real people while `val_accuracy` moved 0.4 — that metric is structurally blind to the
+# thing panel runs exist to improve. v16's top four epochs sat within 0.6 points of each other on
+# it, so which epoch got saved was close to a coin toss with respect to the metric we care about.
+# A 2-epoch smoke test made the disagreement concrete: epoch 2 scored HIGHER on val_accuracy
+# (0.6407 vs 0.6367) and LOWER on human votes (0.5725 vs 0.5848). The old code would have kept
+# the worse checkpoint.
+#
+# What success looks like: v17 beats v16's 67.43% on run 4's population pairs. It cannot beat it
+# by much — the ceiling is whatever the best epoch of this trajectory scores, and v16 may already
+# have landed near it by luck. A null result is still worth having, because it converts "our
+# checkpoint selection might be costing us accuracy" from an unknown into a measured zero.
+#
+# Run: FACEIQ_ARMS="train-v17-panel-select" scripts/sync_panel_to_gpu.sh <ip>
+
+export_dir: data/exports/cmr1mr0m7000196d57zi3vcgn
+run_name: train-v17-panel-select
+
+backbone: arcface_r50
+freeze_backbone: false
+image_size: 112
+batch_size: 32
+epochs: 10
+lr: 0.00001
+weight_decay: 0.0001
+
+val_fraction: 0.5
+split_seed: 42
+num_workers: 4
+skip_ties: true
+augment: true
+
+panel_labels:
+  - [labels/panel-pilot/results, labels/panel-pilot/sample-meta.json]
+  - [labels/panel-run-3/results, labels/panel-run-3/sample-meta.json]
+  - [labels/panel-run-4-random/results, labels/panel-run-4-random/sample-meta.json]
+panel_rejects:
+  - artifacts/panel-run-v1/reject-pids.txt
+  - artifacts/panel-run-v3/reject-pids.txt
+  - artifacts/panel-run-v4/reject-pids.txt
+panel_min_votes: 4
+panel_prior: 1.0
+panel_hard: false

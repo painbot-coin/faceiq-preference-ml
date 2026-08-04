@@ -1,0 +1,54 @@
+# Ship-scale refit of the label recipe that won at measurement scale.
+#
+# train-v13 established WHICH labels to use (crowd majority on panel pairs, +2.00 pts against
+# human votes vs the Gemini labels it replaced, paired 95% CI [+0.60, +3.41]). It ran at
+# val_fraction 0.5 so that 1,928 panel pairs were fully held out and the comparison could be
+# measured. This run applies the same recipe at the split we actually ship.
+#
+# What 0.2 buys, and it is not just "more pairs":
+#
+#   val_fraction  train pairs  carrying a human target  flipped winners  leak-free eval pairs
+#            0.5       13,113                    1,708              796                 1,756
+#            0.2       33,449                    4,413            2,002                   298
+#
+# So the ship split gets 2.6x more human-corrected pairs and 2.5x more flipped winners. The
+# price is the eval set: 298 leak-free panel pairs is ~±2.9 pts, enough for a sanity check
+# and not enough to measure a 2-point effect. That is fine and deliberate — the recipe
+# decision was already made under the 0.5 protocol. Do NOT quote this run's human-agreement
+# number as a measurement; quote train-v13's.
+#
+# The comparable number here is val_accuracy against train-v7/v8, which also ran at 0.2
+# (78.4% best). Val keeps export labels, so it answers "did trusting humans on 13% of pairs
+# cost us anything against Gemini's yardstick" — flat or slightly down is the expected and
+# acceptable result, because those pairs are ones where Gemini is at chance.
+#
+# Run: python scripts/train.py --config configs/train-v14-panel-ship.yaml
+
+export_dir: data/exports/cmr1mr0m7000196d57zi3vcgn
+run_name: train-v14-panel-ship
+
+backbone: arcface_r50
+freeze_backbone: false
+image_size: 112
+batch_size: 32
+epochs: 10
+lr: 0.00001
+weight_decay: 0.0001
+
+val_fraction: 0.2
+split_seed: 42
+num_workers: 4
+skip_ties: true
+augment: true
+
+panel_labels:
+  - [labels/panel-pilot/results, labels/panel-pilot/sample-meta.json]
+  - [labels/panel-run-3/results, labels/panel-run-3/sample-meta.json]
+panel_rejects:
+  - artifacts/panel-run-v1/reject-pids.txt
+  - artifacts/panel-run-v3/reject-pids.txt
+panel_min_votes: 4
+panel_prior: 1.0
+# The ablation at 0.5 could not separate vote share from hard majority (+0.59 pts, 95% CI
+# [-1.47, +0.28]), so ship the simpler target until something distinguishes them.
+panel_hard: true

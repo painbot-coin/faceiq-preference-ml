@@ -133,7 +133,7 @@ Current bundle: **100 rows**, **52 unique analyses with FRONT**, **48 with FRONT
 
 Separate from prod `Face`. Prefix tables e.g. `vlm_pilot_*`.
 
-**Canonical reference (11 models, migrations, sample-set API):** [`scoring-gt-schema.md`](./scoring-gt-schema.md) §1 and §1.5. Below is the original pilot subset; sample curation adds `VlmPilotSampleSet*`, face decile fields, and `VlmPilotRun.sampleSetId`.
+**Canonical reference (11 models, migrations, sample-set API):** [`scoring-gt-schema.md`](../scoring-gt-schema.md) §1 and §1.5. Below is the original pilot subset; sample curation adds `VlmPilotSampleSet*`, face decile fields, and `VlmPilotRun.sampleSetId`.
 
 ### `VlmPilotCohort`
 

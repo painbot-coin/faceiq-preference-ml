@@ -49,7 +49,7 @@ def main() -> int:
     ap.add_argument("--ratings", help="BT ratings.csv for rank agreement (optional)")
     args = ap.parse_args()
 
-    first_cfg = TrainConfig(**torch.load(args.checkpoints[0], map_location="cpu")["config"])
+    first_cfg = TrainConfig.from_saved(torch.load(args.checkpoints[0], map_location="cpu")["config"])
     export = load_export(args.export or first_cfg.export_dir)
     print(f"export OK: run {export.run_id} — ensemble {args.name!r} ({len(args.checkpoints)} models)")
 

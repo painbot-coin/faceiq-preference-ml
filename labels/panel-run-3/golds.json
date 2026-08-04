@@ -1,0 +1,47 @@
+{
+ "version": 1,
+ "runId": "cmr1mr0m7000196d57zi3vcgn",
+ "createdAt": "2026-07-31T04:21:39.741765+00:00",
+ "source": "pilot-500 unanimous (Dit + Alex + Gemini), very_clear/high; 3 retired after panel run v1 (<70% pass), replaced with panel-unanimous pairs",
+ "goldCount": 20,
+ "expected": {
+  "cmr1mr1fw00y496d5mq1r4b5i": "right",
+  "cmr1mr3af03hz96d5k90bgjuc": "left",
+  "cmr1mr3ah03lw96d5khcoutnf": "right",
+  "cmr1mr4w506cy96d54iew725j": "right",
+  "cmr1mr54i06m396d5tcur7nx9": "right",
+  "cmr1mr5cw06y796d59gfjfwv7": "left",
+  "cmr1mr5cy071496d5vqnr9xwt": "right",
+  "cmr1mr61v088k96d57iryuhkz": "left",
+  "cmr1mr61y08du96d5nlysvpdy": "left",
+  "cmr1mraor0fjs96d5rue2d71n": "right",
+  "cmr1mrb5g0gf396d51mrejj7u": "right",
+  "cmr1mrbdt0gui96d59ei5xddh": "right",
+  "cmr1mrf1p0m3o96d5be5szpcp": "right",
+  "cmr1mrh2r0pgb96d5qamu7jnq": "left",
+  "cmr1mrn3v0yrn96d5e0ih160x": "left",
+  "cmr1mrpjm12lt96d5ehilz53w": "left",
+  "cmr1mrqi114cr96d57enud2vx": "right",
+  "cmr1mrdqo0k6r96d51k15r116": "left",
+  "cmr1mrb5g0gg596d5nb73d9zq": "right",
+  "cmr1mroij114b96d5da385iny": "right"
+ },
+ "revision": 2,
+ "retired": {
+  "cmr1mr2t702st96d58isl2kd2": {
+   "want": "left",
+   "passRate": 0.594,
+   "votes": 96
+  },
+  "cmr1mr5tr083a96d5m7edvf9s": {
+   "want": "right",
+   "passRate": 0.604,
+   "votes": 101
+  },
+  "cmr1mril80rl096d5w3etk7go": {
+   "want": "right",
+   "passRate": 0.6,
+   "votes": 85
+  }
+ }
+}

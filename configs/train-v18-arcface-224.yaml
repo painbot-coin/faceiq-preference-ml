@@ -1,0 +1,54 @@
+# Does the comparator lose the middle of the scale because it cannot see enough pixels?
+#
+# The hypothesis. Log §5.8: the network beats the BT ranking under a 10-point percentile gap and
+# loses the 10-45 band by 3-7 points. Two faces 10-45 points apart differ by real but moderate
+# structural margins — jaw width, eye spacing, midface proportion — and every run in the
+# programme has fed the network **112 x 112** pixels. At that size a whole eye is ~12 px across.
+# The near-tie pairs it wins on may be won on coarse cues (skin, symmetry, overall harmony) that
+# survive downsampling, while the mid-gap ordering needs detail that does not.
+#
+# The test. Identical to train-v17 in every other respect: same labels, same split, same lr,
+# same schedule, same selection metric. Only `image_size` changes, 112 -> 224.
+#
+# ⚠️ Read a NULL result carefully, because this arm is confounded and it is better to say so now
+# than to over-read it later. The ArcFace w600k_r50 weights were pretrained on 112 x 112 aligned
+# crops; feeding 224 doubles every feature map and puts the pretrained filters at the wrong
+# spatial scale. So "224 did not help" has two readings — resolution does not matter, OR this
+# backbone cannot use resolution — and this arm alone cannot separate them. If it fails, the
+# follow-up is a backbone that natively wants 224 (the v2 resnet50 run scored 75.4% against VLM
+# labels at 224, so the plumbing exists), NOT a conclusion that detail is irrelevant.
+#
+# Cost: 4x the pixels means roughly 4x the step time, so budget ~2 hours rather than ~35 minutes.
+# batch_size stays 32 so the optimisation is comparable; that is ~4x the activation memory, which
+# still fits an A10G's 23 GB.
+#
+# Run: FACEIQ_ARMS="train-v18-arcface-224" scripts/sync_panel_to_gpu.sh <ip>
+
+export_dir: data/exports/cmr1mr0m7000196d57zi3vcgn
+run_name: train-v18-arcface-224
+
+backbone: arcface_r50
+freeze_backbone: false
+image_size: 224
+batch_size: 32
+epochs: 10
+lr: 0.00001
+weight_decay: 0.0001
+
+val_fraction: 0.5
+split_seed: 42
+num_workers: 4
+skip_ties: true
+augment: true
+
+panel_labels:
+  - [labels/panel-pilot/results, labels/panel-pilot/sample-meta.json]
+  - [labels/panel-run-3/results, labels/panel-run-3/sample-meta.json]
+  - [labels/panel-run-4-random/results, labels/panel-run-4-random/sample-meta.json]
+panel_rejects:
+  - artifacts/panel-run-v1/reject-pids.txt
+  - artifacts/panel-run-v3/reject-pids.txt
+  - artifacts/panel-run-v4/reject-pids.txt
+panel_min_votes: 4
+panel_prior: 1.0
+panel_hard: false

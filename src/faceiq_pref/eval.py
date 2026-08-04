@@ -36,7 +36,7 @@ def heldout_pairwise_accuracy(
     """
     device = pick_device()
     ckpt = torch.load(checkpoint_path, map_location=device)
-    cfg = TrainConfig(**ckpt["config"])
+    cfg = TrainConfig.from_saved(ckpt["config"])
 
     model = PairwiseModel(cfg.backbone, pretrained=False, variance_head=cfg.variance_head).to(
         device
@@ -95,7 +95,7 @@ def score_all_faces_dist(
     """
     device = pick_device()
     ckpt = torch.load(checkpoint_path, map_location=device)
-    cfg = TrainConfig(**ckpt["config"])
+    cfg = TrainConfig.from_saved(ckpt["config"])
     backbone = cfg.backbone
     image_size = cfg.image_size
     scorer = PreferenceScorer(backbone, pretrained=False, variance_head=cfg.variance_head).to(

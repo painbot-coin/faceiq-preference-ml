@@ -27,9 +27,13 @@ def main() -> int:
     print(f"export OK: run {export.run_id} — training run {cfg.run_name!r}")
 
     metrics = train(export, cfg)
-    print(f"\nbest val accuracy: {metrics['best_val_accuracy']:.4f}")
+    print(f"\nbest val accuracy (vs Gemini labels): {metrics['best_val_accuracy']:.4f}")
+    if metrics.get("best_panel_val_accuracy") is not None:
+        print(f"best panel val accuracy (vs human votes): "
+              f"{metrics['best_panel_val_accuracy']:.4f}   <- the one that matters")
     print(f"metrics: artifacts/{cfg.run_name}/metrics.json")
-    print(f"checkpoint: checkpoints/{cfg.run_name}/best.pt")
+    print(f"checkpoint: checkpoints/{cfg.run_name}/best.pt "
+          f"(epoch {metrics['selected_epoch']}, selected on {metrics['selected_on']})")
     return 0
 
 
