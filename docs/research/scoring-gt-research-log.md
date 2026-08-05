@@ -2635,6 +2635,279 @@ face's BT standard error, which `bt_uncertainty.py` already produces — not yet
 Artifacts: `scripts/audit_validation_identities.py` (embedding, thresholding, cluster reports),
 `artifacts/.cache/cohort-arcface.npz` (3,000 cohort embeddings, cached).
 
+#### 5.9a Gender labels are ~20% wrong on labs uploads — and it barely matters to the score
+
+Surfaced the hard way: the first off-cohort judging queue served a male/female pair, because it was
+split on labs' self-declared `prodGender`. Cross-checking with InsightFace `buffalo_l`:
+
+| set | declared | contradicted by the model |
+|---|---|---|
+| `set-1-female` | female | 8 of 82 (10%) |
+| `set-1-male` | male | 121 of 601 (**20%**) |
+
+Neither source is authoritative — eyeballing the 121 disputes shows all three failure modes at once:
+genuinely female faces a "male" account uploaded (people scoring friends), young androgynous men the
+model calls female, and outright junk including a cartoon. So the rule is **agreement, not
+arbitration**: keep faces where the declared label and the model concur, quarantine the rest. That is
+affordable here precisely because the identity audit left 601 male faces for a study needing 70.
+
+Calibration for the model's half of that vote: it agrees with the cohort's human-corrected labels on
+**94.2%** of 400 sampled faces. One trap worth recording — running `genderage.onnx` on a whole photo
+resized to 96×96 scores **60.4%**, barely above chance, because it expects a detector-aligned crop.
+Always go through `FaceAnalysis`.
+
+**Does this throw off the comparator? No, and the reason is structural.** The comparator takes one
+photo and emits one scalar; gender is never an input, so no label error can reach training or
+inference. Gender enters only at *placement*, choosing which reference set supplies the θ scale.
+Measured by scoring 200 cohort faces of each gender against the wrong reference set:
+
+| | /10 shift, median | p90 | tier changes |
+|---|---|---|---|
+| female faces on the male reference set | 0.07 | 0.23 | 8% |
+| male faces on the female reference set | 0.08 | 0.22 | 6% |
+
+Negligible next to the 0.93 /10 p90 placement error, and an order below the 1.54 photo-to-photo
+spread above. **So gender labels matter for the validation study, not for the production score.** In
+the study a cross-gender pair is unanswerable — the two BT graphs share no edge, so there is no
+ground truth to be right about, and a human asked to compare a woman with a man is answering a
+different question. In production a mislabelled user loses about 0.08 /10, which is noise.
+
+Artifact: `scripts/recheck_validation_gender.py`.
+
+---
+
+### 5.10 Off-cohort placement validation, female set — the held-out *face* test, and the ordering passes (complete, 2026-08-05)
+
+**The first accuracy in this programme measured on faces the pipeline has never seen, from a source
+it has never seen, with no VLM label anywhere in the chain.** Every other number is scored against
+BT θ fitted on the same 3,000 faces the comparator trained on. Protocol in
+[`production-scoring-pipeline.md` §7](./production-scoring-pipeline.md); harness
+`scripts/validate_placement.py`; §6.3 Protocol A is now run.
+
+| | |
+|---|---|
+| Photos | 74 female labs uploads from outside the cohort (ArcFace-audited, gender-agreed — §5.9, §5.9a); 70 drawn for judging |
+| Judgements | 385 = 350 fresh + 35 repeats flipped, one rater, blind to every score |
+| Scored | **344** fresh pairs — 350 minus 1 skip and 5 pairs the placement scored *identically* |
+| Placed by | `train-v14-panel-ship` (§3d), context `artifacts/train-v14-panel-ship`, ranking `bt-refit-v5-panel`, 200 stratified references, MediaPipe crop |
+
+| | result |
+|---|--:|
+| your self-agreement on the 35 repeats — **the ceiling** | **97.1%** [85.5, 99.5] |
+| system agrees with you | **84.3%** [80.1, 87.8] |
+| share of the ceiling | 86.8% |
+| inside the 1.33 /10 band (182 pairs) | 75.3% |
+| beyond it (162 pairs) | 94.4% |
+| Kendall τ vs a BT fit on your own judgements (70 photos) | **+0.618** |
+| Spearman, same | +0.809 |
+
+1. **Ordering generalises off-cohort.** 84.3% on 344 pairs, and the pair distribution has to travel
+   with it (§5.8's rule): this is a **uniform draw over the set, median placed gap 1.22 /10** — the
+   easy end, where near-tie draws run ~30 points lower. It is **not** comparable to §5.8's 81.5%:
+   that is agreement with a *crowd majority* on cohort faces, this is agreement with *one rater* on
+   unseen ones. Same shape of draw, different label source, so read it as orientation and never as a
+   paired comparison.
+2. **The gap curve is monotone off-cohort — the band's central claim, tested outside the cohort for
+   the first time.** A flat curve would have meant the score cannot say when to trust it, which is a
+   worse failure than a low average:
+
+| placed gap /10 | pairs | you agreed | the curve predicted |
+|---|--:|--:|--:|
+| 0.04 – 0.56 | 69 | 62.3% | 53.7% |
+| 0.56 – 1.07 | 69 | 82.6% | 60.7% |
+| 1.07 – 1.61 | 68 | 86.8% | 66.1% |
+| 1.61 – 2.22 | 69 | 92.8% | 72.9% |
+| 2.22 – 5.87 | 69 | **97.1%** | 83.6% |
+
+3. **`T = 1.920` does not transfer to a single rater, and must not be refitted on one.** Predicted
+   67.4% against 84.3% observed, roughly +14 points at *every* gap band. That is not a broken curve:
+   T was fitted on panel **ballots**, so it predicts a randomly drawn rater, and one rater compared
+   with *himself* is a far tighter target than two people compared with each other. Measured on run
+   4's uniform draw, **two different panel raters agree with each other 68.1%** of the time
+   (157,955 rater-pairs; 60.4% if a "too close to call" counts as an answer) against this labeller's
+   **97.1%** with himself. Refitting T here would swap a population parameter for a personal one and
+   narrow every user's band on one person's taste. **The earlier harness text — "inside the band
+   should be near chance" — was the wrong reading of this test and has been corrected in the
+   script.** Chance is the prediction for a random rater, not for the labeller.
+
+   > ⚠️ **Self-agreement is not the same metric as the 74.9% panel ceiling, and an earlier draft of
+   > this section put them side by side — the exact error §5.8's rule exists to prevent.** 74.9% is
+   > *one rater against the crowd's majority*; 97.1% is *one rater against himself*. The comparable
+   > figure is the 68.1% rater-versus-rater number above. **Nothing here says this labeller has a
+   > better eye than a panel rater** — that claim needs him to judge pairs the panel also judged and
+   > be scored against the majority, which has not been done. High self-agreement means low internal
+   > noise, which is what makes him a usable yardstick, not that his taste is more representative.
+4. **86.8% of the ceiling is not "it degrades".** 13% of the headroom is real model error on pairs
+   this rater resolves consistently, but the denominator is a single rater's 97.1%, far harsher than
+   any share-of-ceiling in this log. No cohort-internal number exists on this pair draw *and* this
+   label source, so the honest statement is the accuracy plus its draw, not the ratio.
+5. **Weakest at the two ends of the scale, off-cohort as well.** Splitting the inside-band pairs by
+   where on the /10 scale they sit: **37.5%** (n=24) where the pair's midpoint is below 3.5, **85.6%**
+   (n=132) between 3.5 and 5.5, **57.7%** (n=26) above 5.5. Beyond-band pairs are 92–100% in all
+   three. The n's are small and the intervals wide, but the direction reproduces §5.8's measured
+   ~2× placement error at the extremes on cohort faces. If it replicates on the male set, the fix is
+   §3b's widening of the band by `se(θ)` at the ends, not a new model.
+6. **The production path quantises, and it is structural.** 74 photos take **49 distinct /10 values**,
+   and 5 of the 350 fresh pairs came back exactly equal. The reference-set MLE reads only *how many*
+   of the 200 references a face beat, so two faces falling between the same adjacent references are
+   indistinguishable by construction — two users would see the same number. More references narrows
+   it; the band already covers it; the report now counts these separately rather than scoring them.
+7. **This set places below the cohort, and nothing here can say why.** Median percentile 0.368,
+   median 4.46 /10, and 48 of 74 photos land in tiers 2–3. Either live uploads genuinely sit below
+   the curated cohort's middle, or the placement is shifted low. **Only test 3 separates those and it
+   is unrun** — no `ranges.json` — so the /10 should not yet be read as an absolute for off-cohort
+   uploads, only as an ordering.
+8. **Ceiling caveat.** 35 repeat pairs is a wide interval, and the single flip was on a **2.84 /10**
+   gap — i.e. the one pair this rater contradicted himself on was one the model considered easy.
+
+**Three accounting bugs in the harness, all found by reconciling the printed counts against the
+queue, all fixed** (`src/faceiq_pref/offcohort.py` now holds the join, shared with the dashboard):
+a skip counted as a *wrong* answer; pairs tied on the placed score were dropped silently rather than
+reported; and the local BT ran over all 74 placed photos including 4 that were never judged, whose
+θ came entirely from the priors and dragged τ from +0.618 to +0.587.
+
+#### 5.10a The male set — the structure replicates, the level does not (2026-08-05)
+
+Same protocol, same checkpoint, 70 male faces drawn from 480 clean ones, judged the same evening.
+
+| | male | female |
+|---|--:|--:|
+| scored pairs | 348 | 344 |
+| your ceiling (35 repeats) | 94.3% [81.4, 98.4] | 97.1% [85.5, 99.5] |
+| system agrees with you | **76.4%** [71.7, 80.6] | **84.3%** [80.1, 87.8] |
+| share of ceiling | 81.1% | 86.8% |
+| inside the band | 63.9% (202) | 75.3% (182) |
+| beyond it | 93.8% (146) | 94.4% (162) |
+| Kendall τ | +0.511 | +0.618 |
+| median placed gap | 1.10 /10 | 1.22 /10 |
+
+1. **The monotone curve replicates, which is the result that matters.** 52.2% → 68.6% → 74.3% →
+   88.2% → **98.6%** across gap quintiles. Two independent sets, two genders, both monotone without
+   exception: the placed gap is a genuine confidence signal off-cohort, and the tier/band display
+   rests on something measured rather than assumed. Note the closest quintile is **52.2%**, i.e. a
+   coin flip — on the male set the score has *no* information below ~0.4 /10, which is the cleanest
+   demonstration yet that a decimal is not a real number and a band is.
+2. **Males are genuinely harder, and it is not the draw.** The 7.9-point deficit is 2.6 standard
+   errors (se 3.0), and it survives reweighting the male pairs onto the female gap distribution:
+   **78.4%**, so ~6 points is real rather than an artefact of the male draw being slightly closer
+   (1.10 vs 1.22 median gap). It shows up in every gap bin except the widest.
+3. **The rater found males harder too** — 94.3% self-agreement against 97.1%. Part of the deficit
+   is therefore a noisier target, which is exactly what the share-of-ceiling column absorbs, and
+   81.1% against 86.8% says roughly a third of the gap survives that correction.
+4. **The weak region is the *top* of the scale in both genders.** Inside-band accuracy above 5.5 /10
+   is **48.8%** (n=41) male and 57.7% (n=26) female — chance, twice. Below 3.5 the two disagree
+   (76.5% male on n=17, 37.5% female on n=24), so the "both extremes" reading from the female set
+   alone does not survive; the **top** does. That is the thin end of the reference ladder and the
+   region §3b already prescribes widening, now with off-cohort evidence behind it.
+5. 480 male photos placed, **1 unbounded** (beat every reference), /10 range 1.05–10.00, median 4.42
+   — the same low-ish centre as the female set (4.46), so finding 7 above holds for both.
+
+**Artifacts:** `data/validation/set-1-{female,male}/{placements.csv,report.json,pair-review.csv}`;
+dashboard → **Inference** → *Review your judgements* renders every pair with the rater's pick framed
+green and the model's framed red where they differ, filterable to the disagreements — 54 female and
+82 male of the scored pairs, 59 and 91 if the repeats the rater flipped on are counted too.
+
+**Open, in cost order.** ~~The male set~~ ✅ done the same day, §5.10a. Remaining: **ranges** on ~30
+faces to run test 3 and settle finding 7; **this rater against the panel majority** — judging ~200
+of run 4's pairs would say whether his taste is representative or merely consistent, which is the
+one thing the 97.1% does *not* establish; and an **age/QC pass**, which neither set got. The cohort's
+`possible_minor` gate was a VLM pass (§5.0, `artifacts/face-qc-v1/`) and the off-cohort sets went
+through identity and gender audits only. InsightFace's age head puts all 74 female faces at 20+, but
+it is far too weak to close the question — it read one of the youngest-looking faces in the set as
+35 — so this is ~$1 of Gemini across both sets, not a resolved item.
+
+### 5.11 The val split was being reconstructed wrong, and it flatters every held-out placement number we have (complete, 2026-08-05)
+
+**Found while answering "is the system accurate", by asking whether the 81.9% headline is measured
+on faces the comparator trained on. It is — and the tooling that was supposed to catch that was
+itself broken.**
+
+#### The bug
+
+The split is deterministic, which is why several scripts reconstructed it locally instead of loading
+it. `split_by_face_id` shuffles the face ids **appearing in the export's matchups — 3,000 of them**.
+`placement_by_checkpoint.py` and `labs_composite_eval.py` both shuffled the ids in
+`model_scores.csv` / `ratings.csv` instead — **2,866**, because QC dropped 134. Same seed, same
+algorithm, different input list, and `random.shuffle` over a different list is an unrelated
+permutation. Measured overlap between the reconstructed "val" set and the real one: **123 of 599
+faces, 21%** — indistinguishable from two independent 20% draws.
+
+So `--val-only`, the flag whose entire purpose was honesty, was scoring **~79% training faces**.
+
+#### What it changes
+
+`placement_by_checkpoint.py --common-val --references 200`, before and after the fix, `v14`:
+
+| | reconstructed split (wrong) | true split |
+|---|--:|--:|
+| Spearman vs the ranking | **0.926** | **0.852** |
+| median error, F / M | 0.34 / 0.28 | **0.495 / 0.486** |
+| p90 | 0.93 | 1.32 / 1.46 |
+| tier-exact | 67% | **54.4%** |
+
+**This fails Gate 1 as pre-registered** (`production-scoring-pipeline.md`), which asked for Spearman
+> 0.90 and median < 0.5. Spearman is 0.852. The median squeaks under 0.5. The gate is amended there
+rather than here, and it is amended to *failed*, not to a new threshold — the threshold was set in
+advance and the honest measurement missed it.
+
+The checkpoint ordering also moves: **`train-v22-ship-0.2` now leads** (0.487 / 0.465, tier 56.8%,
+ρ 0.857) ahead of the shipped `train-v14-panel-ship` (0.495 / 0.486, tier 54.4%). The margin is
+small enough to be noise on 489 faces, so this is a *re-open*, not a switch — but §3d's "checkpoint
+settled" was settled on numbers that no longer exist.
+
+#### The 81.9% is the ranking's number, not the comparator's
+
+Separately from the reconstruction bug, `labs_composite_eval.py` never restricted the **panel** arm
+to held-out faces at all — the `subjects` filter applied only to the BT-proxy arm. So the headline
+"placement scores 81.9% against the panel majority", which `production-scoring-pipeline.md` called
+"the strongest number we have" and "the claim the product rests on", is measured on a pair set where
+**~96% of pairs contain at least one training face**.
+
+Stratifying the same pairs by how many faces v14 trained on, with `bt-refit-v2-qc` — which predates
+every panel vote and is blind to v14's split — as a difficulty control, since the strata are not
+equally hard (`--leakage-split`):
+
+| faces | pairs | placement | bt-refit-v2-qc | margin | 95% CI |
+|---|--:|--:|--:|--:|--:|
+| both trained on | 1,499 | 82.4% | 81.5% | **+0.9%** | [+0.0, +1.9] |
+| one held out | 760 | 81.4% | 82.0% | −0.5% | [−2.8, +1.7] |
+| both held out | 111 | 78.4% | 84.7% | **−6.3%** | [−12.6, +0.0] |
+
+**In-sample advantage: +7.2 points [+1.1, +13.7]** — the interval excludes zero. The comparator edges
+the ranking on faces it was fitted around and trails it by six points on faces it was not. On the
+leak-free stratum the placement scores 78.4% against a **78.6% human ceiling on those same pairs**:
+level with a person, not eight points above one.
+
+Only 111 leak-free pairs, so that row alone is weak. But it agrees in direction with §5.8's
+independent held-out measurement (comparator 67.67% vs the ranking's 69.50% at vote level, 631
+pairs), and the three strata are monotone. Two protocols, same conclusion.
+
+#### What survives
+
+1. **The ranking's claim is untouched.** `bt-refit-v2-qc` scores 81.7% against a 73.2% individual
+   ceiling. BT is a lookup table over 2,866 known faces — evaluating it on those faces is what it is
+   *for*, and it never saw the votes. "Our ranking of the cohort beats an average person at naming
+   the crowd's choice" remains true and is still the programme's best result.
+2. **The comparator's claim was never separately established, and is now measured lower.** It is the
+   piece that must generalise, because production only ever sees new faces, and every number that
+   made it look ranking-grade was in-sample.
+3. **§5.10's off-cohort test is therefore the only clean read on the thing we ship**, and it was run
+   the day before this was found, which is lucky. 84.3% / 76.4% of a 97.1% / 94.3% ceiling on faces
+   from a different source is the number to quote for an upload.
+
+#### Fixes landed
+
+`placement_by_checkpoint.py` and `labs_composite_eval.py` both call `split_by_face_id` on the real
+export now. `labs_composite_eval.py --leakage-split` prints the table above so the pooled figure
+cannot be quoted without its stratification, and `--photo-quality`'s BT column carries a "do not
+quote, this ranking saw these votes" marker for the same reason.
+
+**Rule, and it is the fourth time a version of this has cost us:** *never re-derive a split, a
+ranking or a label rule that a function already computes.* Load it from the same code path that
+produced it. §5.7 was a ranking that had seen its own votes, §5.8 was two accuracies side by side
+that measured different things, §5.10 was a self-agreement figure next to a crowd-agreement one, and
+this is a shuffle over the wrong list. All four looked right and all four were flattering.
+
 ---
 
 ## 6. Phase 4 — Primary evaluation (publishable experiment)
@@ -2658,7 +2931,7 @@ Artifacts: `scripts/audit_validation_identities.py` (embedding, thresholding, cl
 
 <!-- Held-out sample size, rater instructions, blind procedure. -->
 
-**Protocol A — off-cohort placement validation (built 2026-08-04, unrun).**
+**Protocol A — off-cohort placement validation (built 2026-08-04; female set run 2026-08-05, §5.10).**
 `scripts/validate_placement.py`; full rationale in
 [`production-scoring-pipeline.md` §7](./production-scoring-pipeline.md). This is the held-out *face*
 test §6.3 has been asking for since it was written, and it is stronger than the version originally
@@ -2709,6 +2982,13 @@ Gemini labels it replaced by +2.00 pts (paired 95% CI [+0.60, +3.41]) and its ow
 absolute accuracy is a controlled comparison rather than a shippable number — refit at 0.2. And the
 panel pairs are a held-out *pair* test, not the held-out *face* test §6.3 specifies. Sequence: refit
 v13's label recipe at 0.2, run the §6.3 face-level protocol, then promote those numbers here.
+
+> **The held-out *face* half of that sequence is now done for one gender (§5.10, 2026-08-05).** On 70
+> female faces from outside the cohort, placed through the production path and compared to one rater's
+> blind pairwise ordering: **84.3%** [80.1, 87.8] on 344 pairs of a uniform draw, against that rater's
+> **97.1%** self-agreement ceiling, with a monotone gap-quintile curve (62.3% → 97.1%) and τ **+0.618**
+> against a BT fit on his own judgements. It is one rater and one gender, so it is an off-cohort
+> *generalisation* result, not a population claim — the panel is what gives population figures.
 
 **Both numbers above are worst cases, and §5.8 now gives the population figures.** On a uniform random
 draw of 2,500 pairs (run 4) that entered no fit, agreement with the human **majority** is **81.5%** for the
@@ -2785,6 +3065,9 @@ specifies. Both are needed — the pair test says "does it predict this choice",
 | 2026-08-04 | **Every accuracy figure must state its pair distribution *and* which of the two accuracy metrics it is** (§5.8) | Pair selection alone moves the same ranking ~29 points (52.9% on near-ties, 81.7% on a uniform draw), and majority-level versus vote-level moves it ~10 more (81.7% vs 70.6% on the same pairs). An earlier draft mixed the two and invented a 14-point gap between the ranking and the comparator | Keep quoting the near-tie number alone (rejected — understates by ~29 pts); quote population alone (rejected — hides research progress); pick one metric and drop the other (rejected — they answer different questions, and the product needs both) |
 | 2026-08-04 | **The percentile-band structure is validated, not circular** (§5.8) | Bands cut on the VLM-only ranking predict human agreement monotonically across all six bands (53.2% → 83.6%) on votes that ranking never saw, `spearman(gap, decisiveness) = +0.408`. A circular partition cannot produce a monotone out-of-sample curve | Abandon percentile-gap targeting as self-referential (rejected — measured, it holds) |
 | 2026-08-04 | **Weight the gold screen by draw type** (§5.8) | Gold-failing raters trail by 7.8 pts on run 4's wide draw versus 2.4 in run 2 and 2.2 in run 3, because golds *are* wide pairs. The screen measures task quality on wide draws and close to noise on near-tie draws | One fixed gold threshold for every run (rejected — punishes honest raters on hard draws) |
+| 2026-08-05 | **Do not refit `T` on a single rater's judgements** (§5.10) | The off-cohort set predicts 67.4% agreement and observes 84.3%, ~+14 pts at every gap band — but T describes a *randomly drawn* rater and this rater self-agrees 97.1% against the panel's 74.9% ceiling. Refitting would swap a population parameter for one person's taste and narrow every user's band on it | Refit T off-cohort because predicted ≠ observed (rejected — the mismatch is the rater, not the curve); treat within-band accuracy above chance as a band failure (rejected — chance was never the prediction for one rater) |
+| 2026-08-05 | **Labs' ~10-point deficit is the formula, not the photos** (`production-scoring-pipeline.md`, Labs composite) | Restricting run 4's panel pairs to those where both faces are clean per the §5.0 QC flags moves Labs 71.7% → 72.0% while the human ceiling moves 73.2% → 74.5%, so its *gap to the ceiling widens* (−1.5 → −2.5) while the placement's holds (+8.7 → +8.9). Clean photos help humans and models alike and do nothing differential for Labs. Caveat: the QC schema has no perspective-distortion category, so the selfie-lens version of the hypothesis is untested (~$6 to add) | Ship an upload quality gate to rescue the deterministic score (rejected — measured, it recovers nothing); conclude photo quality does not matter at all (rejected — the distortion dimension was never measured) |
+| 2026-08-05 | **Off-cohort ordering is validated; the /10 as an absolute is not** (§5.10) | 84.3% agreement on a uniform draw of unseen faces from an unseen source, gap-quintile curve monotone 62.3% → 97.1%, τ +0.618. But the set's median lands at percentile 0.368 and no hand ranges were collected, so a low *shift* and a genuinely lower population are indistinguishable | Read the off-cohort /10 as an absolute now (rejected — test 3 unrun); wait for the male set before believing the ordering result (deferred — the female result stands on its own, the male set widens it) |
 
 ### 8.2 Reproducibility manifest
 

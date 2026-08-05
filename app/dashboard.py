@@ -5,6 +5,7 @@ Run:  streamlit run app/dashboard.py
 
 from __future__ import annotations
 
+import base64
 import csv
 import json
 import re
@@ -29,6 +30,7 @@ from faceiq_pref.composite import (  # noqa: E402
     normalise,
 )
 from faceiq_pref.data import ExportError, load_export  # noqa: E402
+from faceiq_pref.offcohort import gap_curve, pair_table, summarise  # noqa: E402
 from faceiq_pref.panel import load_panel_votes  # noqa: E402
 
 st.set_page_config(page_title="FaceIQ Preference ML", layout="wide")
@@ -89,6 +91,61 @@ def gender_choices(series: pd.Series) -> list[str]:
     """Sorted gender labels, ignoring NaN / empty / non-string values."""
     vals = [v for v in series.dropna().unique() if isinstance(v, str) and v.strip()]
     return sorted(vals)
+
+
+PICK_GREEN = "#16a34a"
+MODEL_RED = "#dc2626"
+NEUTRAL = "#e5e7eb"
+
+
+@st.cache_data(show_spinner=False)
+def photo_data_uri(path: str) -> str:
+    """Inline a photo so a coloured frame can be drawn around it.
+
+    `st.image` cannot be styled, and the entire point of the judgement review is seeing *which*
+    side was picked without reading a caption, so those pairs are rendered as HTML. Cached per
+    path: a page of ten pairs re-encodes nothing on a rerun, and a validation set is ~70 photos
+    at ~55 KB.
+    """
+    suffix = Path(path).suffix.lower()
+    mime = {".jpg": "jpeg", ".jpeg": "jpeg", ".png": "png", ".webp": "webp"}.get(suffix, "webp")
+    return f"data:image/{mime};base64," + base64.b64encode(Path(path).read_bytes()).decode()
+
+
+def judgment_pair_html(row: pd.Series, photo_dir: Path) -> str:
+    """One reviewable pair: green frame on the photo you picked, red on the model's if it differs.
+
+    Colour carries one meaning each — green is always your choice, red is always a choice of the
+    model's that you did not make — so a page can be scanned for red without reading anything.
+    """
+    wrong = pd.notna(row["agree"]) and not row["agree"]
+    parts = []
+    for side in ("a", "b"):
+        photo = row[side]
+        path = photo_dir / photo
+        yours = row["winner"] == photo
+        theirs = row["modelPick"] == photo
+        colour = PICK_GREEN if yours else (MODEL_RED if theirs and wrong else NEUTRAL)
+        tags = []
+        if yours:
+            tags.append(f"<b style='color:{PICK_GREEN}'>your pick</b>")
+        if theirs:
+            tags.append("model" if yours else f"<b style='color:{MODEL_RED}'>model</b>")
+        score = row["scoreA"] if side == "a" else row["scoreB"]
+        if pd.notna(score):
+            tags.append(f"{score:.2f} /10")
+        src = photo_data_uri(str(path)) if path.exists() else ""
+        parts.append(
+            f"<figure style='margin:0;flex:1;border:3px solid {colour};border-radius:10px;"
+            f"padding:5px'>"
+            f"<img src='{src}' style='width:100%;display:block;border-radius:6px'/>"
+            f"<figcaption style='font-size:0.78rem;text-align:center;padding-top:4px;color:#6b7280'>"
+            f"{' · '.join(tags) or '&nbsp;'}</figcaption></figure>"
+        )
+    # Capped rather than full width: the point of the page is scanning several pairs for a red
+    # frame, which a pair of 500 px portraits per screen does not allow.
+    return (f"<div style='display:flex;gap:10px;align-items:flex-start;max-width:560px'>"
+            f"{''.join(parts)}</div>")
 
 
 (tab_overview, tab_health, tab_rankings, tab_diag, tab_panel, tab_bands, tab_spend,
@@ -2750,9 +2807,153 @@ with tab_infer:
                     }) + "\n")
                 st.rerun()
 
+        # ---- review what you judged, against what the placement thinks -----------------
+        # Judging is blind on purpose; reviewing is the opposite, and that is the point of keeping
+        # them apart. Nothing below is visible while the queue is unfinished except behind a
+        # warning, because seeing a score for a photo you have not finished judging contaminates
+        # every remaining pair it appears in.
+        if done:
+            from faceiq_pref.placement import DEFAULT_AGREEMENT, band_half_width
+
+            resolvable = 2 * band_half_width(DEFAULT_AGREEMENT)
+            st.divider()
+            st.markdown("#### Review your judgements")
+            pl_file = vdir / "placements.csv"
+            ten: dict[str, float] = {}
+            if pl_file.exists():
+                pl_df = pd.read_csv(pl_file)
+                ten = dict(zip(pl_df["photo"], pl_df["scoreOutOf10"]))
+            table = pair_table(done, ten)
+            unfinished = len(done) < len(queue)
+
+            if not ten:
+                st.info(
+                    "Showing your choices only — no `placements.csv` in this set yet, so there is "
+                    "nothing to compare them to. Run `score` (command above) to get the model's "
+                    "opinion beside each pair."
+                )
+            elif unfinished:
+                st.warning(
+                    f"**{len(queue) - len(done)} pairs still unjudged.** Scores are hidden until "
+                    "the queue is finished: seeing the model's answer for a photo that reappears "
+                    "later in the queue turns the rest of your judging into agreement with a "
+                    "number you have already been shown."
+                )
+                ten = {}
+                table = pair_table(done, ten)
+
+            if ten:
+                m = summarise(table)
+                c1, c2, c3, c4 = st.columns(4)
+                acc_ci = m.get("orderingAccuracyCi95")
+                c1.metric(
+                    "System agrees with you", f"{m['orderingAccuracy']:.1%}",
+                    help=f"{m['pairsUsed']} scored pairs of {m['freshPairs']} fresh "
+                         f"(−{m['skipped']} skipped, −{m['tiedOnPlacedScore']} identical placed "
+                         f"score). 95% CI [{acc_ci[0]:.1%}, {acc_ci[1]:.1%}]. Repeats are excluded "
+                         f"— they measure you, not the model.",
+                )
+                c2.metric(
+                    "Your ceiling", f"{m['yourSelfAgreement']:.1%}",
+                    help=f"How often you gave the same answer on the {m['yourRepeatPairs']} pairs "
+                         f"re-asked with the sides flipped. This, not 100%, is the target.",
+                )
+                c3.metric(
+                    "Share of ceiling", f"{m['shareOfCeiling']:.0%}",
+                    help="Ordering accuracy ÷ your self-agreement. Note a single rater is far more "
+                         "self-consistent than a crowd (74.9% panel ceiling, §5.8), so this "
+                         "denominator is harsher than any share-of-ceiling in the research log and "
+                         "is not comparable to them.",
+                )
+                c4.metric(
+                    "Median placed gap", f"{m['medianGapPoints']:.2f} /10",
+                    help="The pair distribution this accuracy was measured on — a uniform draw "
+                         "over the set, i.e. the easy end. Never quote the accuracy without it "
+                         "(log §5.8): the same system scores ~30 points lower on near-ties.",
+                )
+
+                curve = gap_curve(table)
+                if not curve.empty:
+                    st.caption(
+                        "**Accuracy by how far apart the placement put the two faces.** The band's "
+                        "whole claim is that this rises with the gap. `predicted` is the calibration "
+                        "curve (T = 1.920), which was fitted on panel *ballots* and so predicts a "
+                        "randomly drawn rater — one consistent rater beating it everywhere is "
+                        "expected, and the shape is what is being tested, not the level."
+                    )
+                    st.dataframe(
+                        curve.assign(
+                            gap=lambda d: d.apply(
+                                lambda r: f"{r['gapLow']:.2f} – {r['gapHigh']:.2f}", axis=1),
+                            you=lambda d: (d["accuracy"] * 100).round(1),
+                            curve_predicted=lambda d: (d["predicted"] * 100).round(1),
+                        )[["gap", "pairs", "you", "curve_predicted"]],
+                        hide_index=True, use_container_width=True,
+                        column_config={
+                            "you": st.column_config.NumberColumn("you agreed", format="%.1f%%"),
+                            "curve_predicted": st.column_config.NumberColumn(
+                                "curve predicted", format="%.1f%%"),
+                        },
+                    )
+
+            views: dict = {"All pairs, queue order": lambda d: d}
+            if ten:
+                views |= {
+                    "Model disagreed with you": lambda d: d[d["agree"].eq(False)],
+                    "Model agreed with you": lambda d: d[d["agree"].eq(True)],
+                    "Closest calls (inside the band)":
+                        lambda d: d[d["scored"] & (d["gap"] < resolvable)],
+                    "Identical placed score": lambda d: d[d["tied"]],
+                }
+            views |= {
+                "Repeats where you flipped": lambda d: d[d["selfAgree"].eq(False)],
+                "Skipped": lambda d: d[d["skipped"]],
+            }
+
+            f1, f2, f3 = st.columns([2, 2, 1])
+            view_name = f1.selectbox("Show", list(views), key="val_review_view")
+            sort_name = f2.selectbox(
+                "Order", ["queue order", "widest gap first", "closest gap first"],
+                key="val_review_sort", disabled=not ten)
+            per_page = f3.selectbox("Per page", [5, 10, 20], index=1, key="val_review_page_size")
+
+            shown = views[view_name](table) if not table.empty else table
+            if ten and sort_name != "queue order":
+                shown = shown.sort_values("gap", ascending=sort_name == "closest gap first",
+                                          na_position="last")
+            st.caption(f"{len(shown)} of {len(table)} judgements")
+
+            pages = max(1, (len(shown) + per_page - 1) // per_page)
+            # Page key carries the filter: a stale page number left over from a 35-page view is an
+            # empty screen on a 2-page one.
+            page = (st.number_input("Page", 1, pages, 1, key=f"val_page_{view_name}_{per_page}")
+                    if pages > 1 else 1)
+            for _, row in shown.iloc[(page - 1) * per_page: page * per_page].iterrows():
+                agree, self_agree = row["agree"], row["selfAgree"]
+                head = [f"**#{int(row['index']) + 1}**"]
+                if pd.notna(row["gap"]):
+                    head.append(f"gap **{row['gap']:.2f}** /10")
+                    head.append("inside the band" if row["gap"] < resolvable
+                                else "beyond the band")
+                if row["skipped"]:
+                    head.append(":grey[you skipped this pair]")
+                elif row["tied"]:
+                    head.append(":grey[identical placed score — nothing to be right about]")
+                elif pd.notna(agree):
+                    head.append(":green[**model agrees**]" if agree
+                                else ":red[**model disagrees**]")
+                if row["repeat"]:
+                    said = ("**gave the same answer**" if pd.notna(self_agree) and self_agree else
+                            "**contradicted your earlier answer**" if pd.notna(self_agree) else
+                            "skipped one of the two")
+                    head.append(f":violet[repeat] — you {said} (not counted in the accuracy)")
+                st.markdown(" · ".join(head))
+                st.markdown(judgment_pair_html(row, vdir / "photos"), unsafe_allow_html=True)
+                st.write("")
+
         rep = vdir / "report.json"
         if rep.exists():
-            with st.expander("Last report", expanded=True):
+            with st.expander("Full report JSON"):
                 st.json(json.loads(rep.read_text()))
 
 

@@ -12,9 +12,17 @@ cohort face's comparator score, and placement only uses the *sign* of each compa
 **The honest caveat, and it is the whole reason for `--val-only`.** Cohort faces are training faces
 for most runs, so placing them is optimistic. Worse for cross-run comparison, runs differ in
 `val_fraction` (0.5 for v12/v17, 0.2 for v14), so a run that trained on more faces looks better for a
-reason that has nothing to do with quality. `--val-only` reproduces each run's own val split from its
-config (the split is deterministic: `random.Random(42)` over sorted face ids) and scores only faces
-that run never saw. Use it for any comparison you intend to act on.
+reason that has nothing to do with quality. `--val-only` reproduces each run's own val split and
+scores only faces that run never saw. Use it for any comparison you intend to act on.
+
+> ⚠️ **Fixed 2026-08-05, and it invalidated every `--val-only` number produced before that date.**
+> The split is deterministic, but it is `random.Random(seed)` over the face ids **in the export's
+> matchups (3,000)** — and this script was reconstructing it over the face ids in `model_scores.csv`
+> (**2,866**, after QC exclusions). A shuffle of a different list is a different permutation, so the
+> reconstructed "val" set overlapped the real one by **21%** — chance level. `--val-only` was
+> therefore scoring ~79% training faces and was barely holding anything out. It now calls
+> `split_by_face_id` on the real export, the same function `train.py` uses. `labs_composite_eval.py`
+> had the identical bug and is fixed the same way.
 
 Usage:
     python scripts/placement_by_checkpoint.py --val-only
@@ -25,7 +33,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import random
 import sys
 from pathlib import Path
 
@@ -40,6 +47,7 @@ sys.path.insert(0, str(ROOT / "src"))
 MIN_VAL_FRACTION = 0.2
 
 from faceiq_pref.calibrate import make_scorer  # noqa: E402
+from faceiq_pref.data import load_export, split_by_face_id  # noqa: E402
 from faceiq_pref.placement import (  # noqa: E402
     ANCHORS_TOP10,
     place,
@@ -48,21 +56,24 @@ from faceiq_pref.placement import (  # noqa: E402
 )
 
 
-def val_faces_for(run: str, all_face_ids: list[str]) -> set[str] | None:
-    """Reproduce a run's val face set from its config. -> None if the config is missing."""
-    cfg = ROOT / "configs" / f"{run.replace('train-', 'train-')}.yaml"
-    matches = list((ROOT / "configs").glob(f"*{run.split('train-')[-1]}*.yaml"))
-    if not cfg.exists() and matches:
-        cfg = matches[0]
+def val_fraction_for(run: str) -> float | None:
+    """A run's `val_fraction` from its config. -> None if no config matches."""
+    cfg = ROOT / "configs" / f"{run}.yaml"
     if not cfg.exists():
-        return None
-    frac = 0.2
+        matches = list((ROOT / "configs").glob(f"*{run.split('train-')[-1]}*.yaml"))
+        if not matches:
+            return None
+        cfg = matches[0]
     for line in cfg.read_text().splitlines():
         if line.strip().startswith("val_fraction:"):
-            frac = float(line.split(":", 1)[1].split("#")[0].strip())
-    ids = sorted(all_face_ids)
-    random.Random(42).shuffle(ids)
-    return set(ids[: int(len(ids) * frac)])
+            return float(line.split(":", 1)[1].split("#")[0].strip())
+    return 0.2
+
+
+def val_faces(matchups, fraction: float, seed: int = 42) -> set[str]:
+    """The faces a run held out — via the same call `train.py` makes, not a re-derivation."""
+    _, val = split_by_face_id(matchups, fraction, seed)
+    return {f for m in val for f in (m.face_a_id, m.face_b_id)}
 
 
 def main() -> None:
@@ -82,6 +93,13 @@ def main() -> None:
     to_ten = make_scorer(ANCHORS_TOP10)
     runs = sorted(p.parent for p in (ROOT / "artifacts").glob("*/model_scores.csv"))
     out: list[dict] = []
+
+    matchups = common_val_faces = None
+    if a.val_only or a.common_val:
+        export = next(p for p in sorted((ROOT / "data" / "exports").glob("*"))
+                      if (p / "faces.jsonl").exists())
+        matchups = load_export(export).all_matchups()
+        common_val_faces = val_faces(matchups, MIN_VAL_FRACTION)
 
     for run_dir in runs:
         run = run_dir.name
@@ -109,13 +127,11 @@ def main() -> None:
             if a.common_val:
                 # ids[:20%] is a subset of ids[:50%] under a shared seed, so these faces are val
                 # for every run regardless of its own val_fraction.
-                ids = sorted(scores["faceId"])
-                random.Random(42).shuffle(ids)
-                common = set(ids[: int(len(ids) * MIN_VAL_FRACTION)])
-                targets = [f for f in targets if f in common]
+                targets = [f for f in targets if f in common_val_faces]
             elif a.val_only:
-                vf = val_faces_for(run, list(scores["faceId"]))
-                if vf is not None:
+                frac = val_fraction_for(run)
+                if frac is not None:
+                    vf = val_faces(matchups, frac)
                     targets = [f for f in targets if f in vf]
             if len(targets) < 30:
                 continue

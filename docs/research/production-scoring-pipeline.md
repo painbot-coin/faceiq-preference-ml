@@ -694,18 +694,44 @@ dashboard's **Score bands** tab — set sigma to 0.1 to see the case where it is
 
 ---
 
-## 7. Validating the whole thing on faces from outside the cohort — PHOTOS IN, BLOCKED ON GENDER
+## 7. Validating the whole thing on faces from outside the cohort — FEMALE SET DONE, ORDERING PASSES
 
 `scripts/validate_placement.py` + the **"Validate on unseen faces"** block in the Inference tab.
 Built 2026-08-04, smoke-tested end to end.
 
-**Status 2026-08-04 evening: READY TO JUDGE.** Harsh delivered 1,000 labs front photos with a
-gender column. After fetching and auditing, two queues are built and waiting:
+**Status 2026-08-05: both sets are judged, scored and reported — full numbers and readings in
+[log §5.10 / §5.10a](./scoring-gt-research-log.md).** 385 judgements per gender over 70 unseen faces
+each:
 
-| set | distinct faces | queue | rejected |
+| | female | male |
+|---|--:|--:|
+| system agrees with the rater (uniform draw) | **84.3%** [80.1, 87.8] | **76.4%** [71.7, 80.6] |
+| that rater's own ceiling, 35 flipped repeats | 97.1% | 94.3% |
+| accuracy across gap quintiles — **monotone in both**, the band's central claim, first test off-cohort | 62.3% → 97.1% | 52.2% → 98.6% |
+| Kendall τ vs a BT fit on the rater's own judgements | +0.618 | +0.511 |
+
+Males are ~6 points harder after reweighting onto the female gap distribution, so it is not the draw;
+and inside-band accuracy at the **top** of the scale is at chance in both (48.8% male, 57.7% female),
+which is the thin end of the reference ladder and the region §3b already prescribes widening.
+
+Three readings that matter more than the headline: **the score knows when to trust itself off-cohort**
+(the quintile curve rises without exception); **`T = 1.920` predicted 67.4% against 84.3% observed and
+must not be refitted here**, because T describes a *randomly drawn* rater and one consistent rater
+beats that by construction — so the old "inside the band should be near chance" line in this section
+was the wrong reading and the harness has been corrected; and **the placement quantises**, 74 photos
+onto 49 distinct /10, because the MLE reads only how many references a face beat.
+
+Still open: the male set (6 of 385 judged), hand *ranges* for test 3 — without which finding 7's
+question (this set's median lands at percentile 0.368, either a real population difference or a low
+shift) cannot be answered — and an age/QC gate this set never got, unlike the cohort.
+
+**Backdrop as of 2026-08-04.** Harsh delivered 1,000 labs front photos with a gender column. After
+fetching and auditing, two queues were built:
+
+| set | clean faces | queue | rejected |
 |---|---|---|---|
-| `set-1-female` | 82 (70 drawn) | 350 pairs + 35 repeats | 4 cohort re-uploads, 22 repeat identities |
-| `set-1-male` | 601 (70 drawn) | 350 pairs + 35 repeats | 109 cohort re-uploads, 180 repeat identities |
+| `set-1-female` | 74 (70 drawn) | 350 pairs + 35 repeats | 4 cohort re-uploads, 22 repeat identities, 8 gender disputes |
+| `set-1-male` | 480 (70 drawn) | 350 pairs + 35 repeats | 109 cohort re-uploads, 180 repeat identities, 121 gender disputes |
 
 **The id-level exclusion list was not enough, and this is the headline.** Zero of the 1,000 face
 ids appear in the cohort, so Harsh applied the list correctly — but **113 of the 998 photos (11%)
@@ -719,6 +745,10 @@ Two supporting findings from the same pass:
 - **The `/faces/<id>/` path segment is an account, not a person.** 20 accounts carry both male and
   female photos, so people are scoring their friends. Deduping on it would have thrown away real
   faces; identity clustering is the right tool and it removed 202 repeats.
+- **`prodGender` is wrong on ~20% of male uploads** (log §5.9a), which is how the first queue came to
+  serve a male/female pair. Kept only faces where the declared label and InsightFace agree. This
+  matters for the *study*, where a cross-gender pair has no ground truth at all, far more than for
+  the *score*, where the wrong reference set costs about 0.08 /10.
 - **Normalisation parity holds, measured.** The normaliser moves these real uploads **7.85** mean
   abs pixel value against **7.66** for cohort photos, face detected 25/25 on both. Same crop
   pipeline, no preprocessing shift, so §4's normalisation suspect is not live here.
@@ -797,6 +827,8 @@ python scripts/fetch_validation_photos.py --csv ~/Downloads/data-lab-front-photo
 # drop cohort re-uploads and repeat identities by face, not by id
 python scripts/audit_validation_identities.py --set set-1-female --set set-1-male \
     --threshold 0.45 --apply
+# quarantine faces where labs' declared gender and the face model disagree
+python scripts/recheck_validation_gender.py --set set-1-female --set set-1-male --apply
 python scripts/validate_placement.py make-pairs --set set-1-female --pairs 350 \
     --repeat 0.1 --max-photos 70
 
@@ -888,6 +920,44 @@ not BT. The plumbing in the Inference tab is deliberately generic so the EBM dro
 **The rule that does not change:** Labs `overall_score` is never a training target. Held-out
 comparison only.
 
+#### Is the formula bad, or are the photos? Measured 2026-08-05 — the formula
+
+Labs sits at 71.7% against a 73.2% individual-human ceiling, i.e. roughly at the level of one
+average person and ~10 points behind the placement. A reasonable hypothesis is that this is a
+**photo** problem rather than a formula problem: distorted selfies, screenshots and bad lighting
+would corrupt a geometric formula while leaving a CNN's pixels legible, and if so the fix is an
+upload quality gate, not retiring the formula.
+
+**It is not.** The §5.0 QC pass already recorded per-photo issues on all 2,998 cohort faces, so this
+cost nothing to run (`labs_composite_eval.py --photo-quality`). Splitting run 4's 2,370 panel pairs
+by whether *both* faces are clean:
+
+| pairs | human ceiling | Labs | Labs − ceiling | placed | placed − ceiling |
+|---|--:|--:|--:|--:|--:|
+| all 2,370 | 73.2% | 71.7% | −1.5 | 81.9% | +8.7 |
+| both faces clean (1,266) | 74.5% | 72.0% | **−2.5** | 83.5% | **+8.9** |
+| either flagged (1,104) | 71.7% | 71.3% | −0.4 | 80.1% | +8.4 |
+
+**Read the gap columns.** Clean pairs are easier for *everyone* — the human ceiling itself rises
+1.3 points — so Labs' +0.3 improvement is less than the ceiling's move and its distance to the
+ceiling gets **worse**, −1.5 → −2.5. The placement's gap is flat at +8.7 → +8.9. Photo quality makes
+pairs easier for humans and models alike and does nothing differential for Labs, so **the ~10-point
+deficit is the formula, and a quality gate would not recover it.**
+
+Two honest limits on that conclusion. The QC schema records `screenshot`, `obstruction`,
+`poor_lighting`, `low_resolution`, `heavy_filter`, `multiple_faces`, `face_cropped` and
+`extreme_angle` — it has **no wide-angle/perspective-distortion category**, and `extreme_angle` fired
+on only 5 faces of 2,998, so the specific *selfie lens distortion* version of the hypothesis is
+barely covered by this test. Testing that properly means adding a distortion dimension to the QC
+prompt and re-running it (~$6 across the cohort), and it is the one photo variable that would
+plausibly hurt a landmark formula while sparing a CNN — which is exactly the mechanism the next
+section is built on. Second, every cohort photo is a 1024×1024 crop from one funnel, so the range of
+photo quality here is narrower than production will see.
+
+A quality gate may still be worth building for other reasons — user trust, and the fact that
+`low_resolution` and `obstruction` together touch a fifth of the cohort — but it should not be sold
+as a way to make a deterministic score competitive.
+
 ### Distortion-dependent weighting between the two sources
 
 Worth recording because it is the sharpest version of the two-source idea, and it does not have the
@@ -911,6 +981,13 @@ metric; its error correlation with the comparator has to be *measured* (if it is
 nothing — this is what killed §5.6's blends); and `sigma_geo` needs calibrating against something,
 which means checking that predicted-distortion actually tracks geometric error on our own cohort.
 Until those three, treat it as a design sketch, not a plan.
+
+**One cheap precursor, worth doing before the EBM exists.** The section above measured that generic
+photo quality does *not* explain Labs' deficit — but the QC schema has no distortion category, so the
+specific claim here (perspective corrupts geometry, not pixels) is untested. Adding a
+`perspective_distortion` / `focal_distance` dimension to the QC prompt and re-running it over the
+cohort is ~$6, and it would either give `sigma_geo` its first empirical hook or kill the idea before
+anyone builds an EBM around it.
 
 ---
 
@@ -949,28 +1026,62 @@ sharper ruler is the point.
 differently. Written as **pass/fail thresholds set in advance**, because a threshold chosen after
 seeing the number is not a test.
 
-**Gate 1 — internal consistency. ✅ PASSED.** Does placement reproduce the ranking of record on faces
-the model never trained on? Threshold was Spearman > 0.90 and median error < 0.5 /10. Measured with
-`train-v14-panel-ship`: **ρ = 0.926, median 0.34 / 0.28, p90 0.93, tier-exact 67%**. This is a
-plumbing test — it proves the estimator is wired correctly, and nothing more. Failing it would have
-meant a bug.
+**Gate 1 — internal consistency. ❌ FAILED as pre-registered** (was recorded as passed until
+2026-08-05; see log §5.11). Does placement reproduce the ranking of record on faces the model never
+trained on? Threshold, set in advance: **Spearman > 0.90 and median error < 0.5 /10**. The passing
+figures — ρ 0.926, median 0.34 / 0.28, tier-exact 67% — came from a **mis-reconstructed validation
+split**: the reconstruction shuffled the 2,866 post-QC face ids while the real split shuffles the
+3,000 ids in the export's matchups, so the two sets overlapped **21%** and `--val-only` was scoring
+~79% training faces. On the true split, `train-v14-panel-ship` scores **ρ = 0.852, median
+0.495 / 0.486, p90 1.32 / 1.46, tier-exact 54.4%** over 489 held-out faces.
 
-**Gate 2 — human agreement on cohort faces. ✅ PASSED, and this is the strongest number we have.**
-On run 4's uniform pairs, does the system pick the crowd's winner? The bar is not 100%, it is what a
-*person* achieves: one rater against the majority of the others scores **73.2%**. The system scores
-**81.9%**. It is already better than an average individual human at predicting what a crowd will
-prefer, on pairs drawn from the whole population. That is the claim the product rests on.
+Spearman misses the bar. The gate is recorded as failed rather than re-thresholded, because a
+threshold moved after seeing the number is not a threshold. What it means in practice is narrower
+than "the system is broken": this gate compares placement against **BT /10 as an exact value**, and
+§5.8 already established BT is a *proxy*. The tier-level and ordering claims are tested by gates 2
+and 3, which use human votes. Read this as *the estimator is noisier than we thought at reproducing
+an exact /10*, which is the same message as the tier-not-decimal finding everywhere else.
 
-**Gate 3 — off-cohort generalisation. ❌ NOT TESTED. The only untested link in the chain.** Every
-number above is measured on faces from the same 3,000-face pool. Production only ever sees faces from
-elsewhere. §7 is this test. Thresholds, set now:
+**Gate 2 — human agreement on cohort faces. ✅ PASSED for the ranking, ⚠️ NOT ESTABLISHED for the
+comparator.** On run 4's uniform pairs, does the system pick the crowd's winner? The bar is not 100%,
+it is what a *person* achieves: one rater against the majority of the others scores **73.2%**.
 
-| | pass | investigate | fail |
-|---|---|---|---|
-| ordering, as a share of your own repeat-pair ceiling | ≥ 90% | 80–90% | < 80% |
-| accuracy on pairs > 1.33 /10 apart | ≥ 75% | 65–75% | < 65% |
-| accuracy on pairs < 1.33 /10 apart | 50–65% *(near chance is the correct answer here)* | — | > 75%, which would mean the band is too wide |
-| systematic shift, if you collect ranges | < 0.5 /10 | 0.5–1.0 | > 1.0 → re-anchor |
+* **The ranking passes cleanly.** `bt-refit-v2-qc` — fitted on VLM labels only, predating every panel
+  vote — scores **81.7%**, i.e. **+8.5 points better than an average individual human** at naming the
+  crowd's choice. BT is a lookup table over known faces, so scoring it on those faces is exactly its
+  job. This is the programme's strongest result and it stands.
+* **The comparator's 81.9% does not transfer to it.** That figure is measured on a pair set where
+  ~96% of pairs contain a face the comparator trained on. Split by training membership with a
+  vote-blind ranking as the difficulty control (log §5.11), the comparator beats that ranking by
+  +0.9 pts on faces it trained on and **trails it by 6.3 pts on faces it did not**, an in-sample
+  advantage of **+7.2 pts [+1.1, +13.7]**. On the leak-free pairs it scores 78.4% against a 78.6%
+  human ceiling for those pairs — **level with a person, not above one.**
+
+The product claim must therefore be stated as *"our ranking of the cohort beats an average person"*,
+which is true, and not as *"our uploaded-photo score beats an average person"*, which is not
+established. Gate 3 is the honest read on the second.
+
+**Gate 3 — off-cohort generalisation. ⚠️ PARTIAL PASS, tested 2026-08-05** (log §5.10, §5.10a).
+140 unseen faces from a different source, 770 judgements by one rater:
+
+| | threshold | female | male | |
+|---|---|--:|--:|---|
+| ordering, as a share of the rater's repeat-pair ceiling | pass ≥ 90%, investigate 80–90% | 86.8% | 81.1% | ⚠️ investigate, both |
+| accuracy on pairs > 1.33 /10 apart | pass ≥ 75% | 94.4% | 93.8% | ✅ clear pass |
+| accuracy on pairs < 1.33 /10 apart | 50–65%; > 75% would mean the band is too wide | 75.3% | 63.9% | ⚠️ not evaluable — see below |
+| systematic shift, if you collect ranges | < 0.5 /10 | — | — | ❌ not collected |
+
+**The third row cannot be scored as written, and that is a flaw in the pre-registration rather than
+a result.** It assumed the labeller behaves like the random rater `T` was fitted on. He does not:
+two panel raters agree with each other 68.1% of the time and he agrees with himself 97.1%, so he
+resolves pairs the *population* genuinely splits on. A conservative reading is that the band may be
+wider than a consistent user needs; ruling that in or out needs multi-rater off-cohort data, not a
+re-scored threshold.
+
+**What passed is the part that matters most.** Accuracy rises monotonically with the placed gap in
+both sets, without exception — 62.3% → 97.1% female and 52.2% → 98.6% male. That is the band's
+central claim, tested for the first time on faces from a different source, and it replicated across
+two independent sets. The score's *confidence signal* generalises even where its level is shakier.
 
 **Gate 4 — the product holds up in front of users. Not yet designed.** Distinct from accuracy, and it
 can fail while gates 1–3 all pass. Things to watch once live: the share of uploads returning an
@@ -984,6 +1095,13 @@ claiming an improvement must be scored against panel votes.** BT-target metrics 
 only. A change that moves the proxy and not the target is fitting the proxy's error, and it will look
 statistically significant while doing nothing for anyone.
 
+**And the second rule, from log §5.11: never re-derive a split.** Two scripts reconstructed the
+validation split locally instead of calling `split_by_face_id`, got a set overlapping the real one by
+21%, and produced "held-out" numbers for months that were ~79% training faces. Load splits, rankings
+and label rules from the code path that created them. Every quoted accuracy needs *three* things
+attached, not two: the pair distribution (§5.8), the label source, and **whether the model trained on
+those faces.**
+
 ---
 
 ## Ship order
@@ -994,8 +1112,8 @@ statistically significant while doing nothing for anyone.
 | **1** | **Ship the band / tier** — `T = 1.920`, computed in percentile space, displayed as one of ~7 tiers (§5b), with the default sentence at 2-in-3 and a 90% floor claim (§5c-ter) | free | nothing. The agreement level is **settled at 2-in-3**, because that is exactly one tier down (§5c-ter) — it was the last open product call here |
 | **1-a** | **Tier exemplar faces** — 1–3 per tier per gender, from consented / licensed / generated sources, never cohort photos (§5c-quater) | sourcing only | nothing model-side. Tiers without exemplars are the weakest part of the surface, and this is where hand-picking is *correct* |
 | ~~2~~ | ~~Normalisation parity audit~~ ✅ **verified 2026-08-04, three-way.** `faceiq-labs/src/lib/utils/mediapipe.ts` `makeHeadshot`, `faceiq-labs/sagemaker/front-model/code/inference.py`, and `faceiq_pref/preprocess.py` all use identical constants (`OUTPUT_SIZE 1024`, `HEAD_FILL 0.65`, `EYE_HEIGHT 0.5`, `HAIR_ALLOW 0.12`), identical MediaPipe indices (33 / 263 / 10 / 152), the same eye-midpoint rotation and the same `/0.55` fallback. Only difference found: the interpolation threshold is `>` in the ML port and `>=` in SageMaker, which differs only at exactly 1:1 scale where both are identity | free | done — **so odd upload scores are not a crop bug.** The remaining check is that the production upload path actually calls one of these three, rather than a fourth implementation |
-| 3 | **Wire reference-set placement** (200 refs, tier-stratified) into the inference path. Handle the two behaviours in §3b: widen the band at the extremes using the per-user `se(θ)`, and cap faces with no finite MLE | free | **checkpoint settled: `train-v14-panel-ship`** (§3d). Buys the standard error the band wants, a θ-scale position, and 200 passes instead of 2,866 |
-| **3-a** | **`train-v22-ship-0.2`** — v17's label recipe at `val_fraction: 0.2`, i.e. v14's data volume with the better labels | ~$2 GPU | one config file. The only cheap experiment left with obvious upside, and it feeds straight into step 3 |
+| 3 | **Wire reference-set placement** (200 refs, tier-stratified) into the inference path. Handle the two behaviours in §3b: widen the band at the extremes using the per-user `se(θ)`, and cap faces with no finite MLE | free | **checkpoint re-opened 2026-08-05** — §3d settled on `train-v14-panel-ship` using the broken val split (log §5.11). On the true split **`train-v22-ship-0.2` leads** (0.487 / 0.465, tier 56.8%, ρ 0.857) over v14 (0.495 / 0.486, 54.4%, 0.852). Margin is within noise on 489 faces, so decide it deliberately rather than by default |
+| ~~3-a~~ | ~~`train-v22-ship-0.2`~~ ✅ **run** — and on the corrected split it is the best checkpoint we have, which is what re-opened step 3 | ~$2 GPU | done |
 | 3b | **A/B the 200-reference vs all-2,866 variants** side by side in the dashboard on real uploads (§3d) | free | step 3 |
 | **3c** | **Off-cohort validation** (§7) — 50–100 unseen photos, ~300 pairwise judgements, ~20 min of your time. Harness built and smoke-tested; needs photos | free | nothing. **Do this before step 6.** It is the only test of whether any of this survives contact with faces from a different source, and a failure here changes what to build next |
 | 4 | Photo QC gate on upload | ~$0.002/image | — |

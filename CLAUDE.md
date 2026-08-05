@@ -96,13 +96,32 @@ faceiq-labs copy is **1,188 lines last touched 2026-07-25**, missing §5.5 (huma
 honest calibration, the spend verdict) — over 1,000 lines and every decision since. Write here. Sync
 to faceiq-labs deliberately, as a publish step, not by assuming it is ahead.
 
-**Current state in one line (2026-08-04):** the labelling programme is finished — $14,367 of planned
+**Current state in one line (2026-08-05):** the labelling programme is finished — $14,367 of planned
 spend was cancelled on measurement, and the bottleneck is the neural comparator, which is 1.8–2.1
 points *behind* the ranking it was distilled from on typical pairs. `train-v16` then added run 4's
 wide-band votes and **changed nothing in the weak band**, confirming this is an extraction failure
 rather than a data shortage. Next actions, none needing new labels: fix checkpoint selection (it uses
 `val_accuracy`, scored against Gemini, which cannot see the improvement), try 224 px, and measure a
 gap-routed ensemble.
+
+**And as of 2026-08-05 the whole path is validated off-cohort, both genders** (log §5.10, §5.10a): on
+70 female and 70 male faces from outside the cohort, the production placement reproduces one rater's
+blind ordering **84.3%** / **76.4%** of the time against his own **97.1%** / **94.3%** ceilings, and
+**accuracy rises monotonically with the placed gap in both sets** — that replication is the result,
+because it is the band's central claim tested on faces no model has seen. Males are ~6 points harder
+after controlling for the pair draw. Rules that came out of it: **never refit `T` on a single rater**
+(it describes a *random* rater — two real panel raters agree with each other only **68.1%** of the
+time, so one rater against himself at 97.1% is a far tighter target, and predicted 67.4% vs observed
+84.3% is the rater, not a broken curve); **self-agreement is not the 74.9% panel ceiling** — one
+rater vs himself and one rater vs the crowd are different metrics and must not be set side by side;
+and the off-cohort **/10 as an absolute is still untested** because no hand ranges were collected.
+
+Also 2026-08-05, and it closes a live hypothesis: **Labs' ~10-point deficit is the formula, not the
+photos.** Restricting the panel comparison to pairs where both faces are clean per the §5.0 QC flags
+widens Labs' gap to the human ceiling (−1.5 → −2.5) while the placement's holds (+8.7 → +8.9) — clean
+photos help humans and models alike, so an upload quality gate recovers nothing. The one part still
+untested is *perspective distortion*, which the QC schema has no category for
+(`production-scoring-pipeline.md`, Labs composite).
 
 - `docs/research/README.md` — **entry point**; live-doc index and priorities
 - `docs/research/scoring-gt-research-log.md` — the lab notebook; **§5.8 (run 4) is the newest finding**

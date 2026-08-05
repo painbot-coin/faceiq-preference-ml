@@ -49,7 +49,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
 import random
 import sys
 from pathlib import Path
@@ -60,10 +59,9 @@ import pandas as pd
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
+from faceiq_pref.offcohort import gap_curve, pair_table, summarise  # noqa: E402
 from faceiq_pref.placement import (  # noqa: E402
     DEFAULT_AGREEMENT,
-    TEMPERATURE_TEN,
-    band_half_width,
     place,
     stratified_reference_ids,
     tier_of,
@@ -219,6 +217,11 @@ def fit_local_bt(judgments: list[dict], photos: list[str], iters: int = 500) -> 
     Deliberately not the cohort fit: this is *your* ranking of these photos, so Kendall tau against
     it measures agreement on ordering without importing the cohort's scale, its anchor ladder, or
     any of the VLM labels.
+
+    Pass only photos that were **judged**. `make-pairs --max-photos` draws a subset, so a set can
+    hold placed photos with no comparisons at all; those get theta straight from the +1/+2 priors,
+    i.e. one shared constant, and feeding that block of artificial ties to Kendall tau drags it down
+    for no reason (measured: +0.587 with 4 unjudged photos in, +0.618 with them out).
     """
     idx = {p: i for i, p in enumerate(photos)}
     wins = np.zeros((len(photos), len(photos)))
@@ -252,73 +255,27 @@ def report(name: str, agreement: float) -> None:
         raise SystemExit(f"no judgments at {d / 'judgments.jsonl'} — label some pairs first.")
     judgments = [json.loads(ln) for ln in (d / "judgments.jsonl").read_text().splitlines() if ln]
     ten = dict(zip(placements["photo"], placements["scoreOutOf10"]))
-    out: dict = {"set": name, "photos": len(placements), "judgments": len(judgments)}
 
-    # ---- 1. your own repeat rate: the ceiling -----------------------------------
-    first: dict[frozenset, str] = {}
-    repeat_hits = repeat_total = 0
-    fresh: list[dict] = []
-    for j in judgments:
-        key = frozenset((j["a"], j["b"]))
-        if key in first:
-            repeat_total += 1
-            repeat_hits += int(first[key] == j["winner"])
-        else:
-            first[key] = j["winner"]
-            fresh.append(j)
-    ceiling = repeat_hits / repeat_total if repeat_total else None
-    out["yourRepeatPairs"] = repeat_total
-    out["yourSelfAgreement"] = ceiling
-
-    # ---- 2. ordering: placed score vs your winner ------------------------------
-    scored = [j for j in fresh if j["a"] in ten and j["b"] in ten]
-    hits = ties = 0
-    gaps: list[tuple[float, bool]] = []
-    for j in scored:
-        ga, gb = ten[j["a"]], ten[j["b"]]
-        if ga == gb:
-            ties += 1
-            continue
-        pick = j["a"] if ga > gb else j["b"]
-        ok = pick == j["winner"]
-        hits += int(ok)
-        gaps.append((abs(ga - gb), ok))
-    n = len(scored) - ties
-    out["pairsUsed"] = n
-    out["orderingAccuracy"] = hits / n if n else None
-    if ceiling and n:
-        # Fraction of the achievable headroom that was captured. 100% means the system is as
-        # consistent with you as you are with yourself, which is the most that can be asked.
-        out["shareOfCeiling"] = (hits / n) / ceiling
-
-    # Accuracy by whether the two faces are further apart than the scale can resolve. The band's
-    # whole claim is that inside this distance we should not be believed; outside it we should.
-    resolvable = 2 * band_half_width(agreement)
-    out["resolvableGapPoints"] = resolvable
-    for label, keep in (
-        ("withinBand", lambda g: g < resolvable),
-        ("beyondBand", lambda g: g >= resolvable),
-    ):
-        sub = [ok for g, ok in gaps if keep(g)]
-        out[f"accuracy_{label}"] = (sum(sub) / len(sub)) if sub else None
-        out[f"pairs_{label}"] = len(sub)
-
-    # Predicted vs observed agreement: the calibration curve applied to unseen faces. If the model
-    # says 67% and you agree 67% of the time, T transfers off-cohort — which is the assumption the
-    # entire band rests on and has never been tested outside the cohort.
-    if gaps:
-        pred = [1 / (1 + math.exp(-g / TEMPERATURE_TEN)) for g, _ in gaps]
-        out["predictedAgreement"] = float(np.mean(pred))
-        out["observedAgreement"] = float(np.mean([ok for _, ok in gaps]))
+    # ---- 1+2. ceiling, ordering, the band — all from the shared pair table ------
+    # Same join the dashboard's review view renders, so a pair marked green there is a pair counted
+    # here. `pair_table` is where skips, placed-score ties and repeats are separated out.
+    table = pair_table(judgments, ten)
+    out: dict = {"set": name, "photos": len(placements)}
+    out.update(summarise(table, agreement))
+    table.to_csv(d / "pair-review.csv", index=False)
+    curve = gap_curve(table)
+    out["gapCurve"] = curve.to_dict("records") if not curve.empty else []
 
     # ---- 3. Kendall tau against a BT fit on your judgments ---------------------
-    photos = list(placements["photo"])
-    if len(scored) >= 3 * len(photos):
+    scored = [j for j in judgments if j.get("winner")]
+    photos = sorted({p for j in scored for p in (j["a"], j["b"])} & set(ten))
+    out["photosJudged"] = len(photos)
+    if photos and len(scored) >= 3 * len(photos):
         from scipy.stats import kendalltau, spearmanr
 
         yours = fit_local_bt(scored, photos)
         a = [yours[p] for p in photos]
-        b = list(placements["scoreOutOf10"])
+        b = [ten[p] for p in photos]
         out["kendallTauVsYourBt"] = float(kendalltau(a, b).statistic)
         out["spearmanVsYourBt"] = float(spearmanr(a, b).statistic)
     else:
@@ -367,28 +324,48 @@ def _print_report(o: dict) -> None:
     def pct(v):
         return "  n/a" if v is None else f"{v:6.1%}"
 
+    def ci(key):
+        v = o.get(key)
+        return "" if not v else f"  [{v[0]:.1%}, {v[1]:.1%}]"
+
     print(f"\n=== validation: {o['set']} ===")
-    print(f"{o['photos']} unseen photos, {o['judgments']} judgments "
-          f"({o.get('pairsUsed', 0)} usable fresh pairs)\n")
+    print(f"{o['photos']} unseen photos, {o['judgments']} judgments -> "
+          f"{o.get('pairsUsed', 0)} scored pairs "
+          f"({o.get('freshPairs', 0)} fresh, minus {o.get('skipped', 0)} skipped and "
+          f"{o.get('tiedOnPlacedScore', 0)} tied on the placed score)\n")
 
     print("1. ORDERING — does the placed score reproduce your choices?")
     print(f"   your self-agreement on repeats  {pct(o.get('yourSelfAgreement'))}"
-          f"   <- the ceiling ({o.get('yourRepeatPairs', 0)} repeat pairs)")
-    print(f"   system vs you                   {pct(o.get('orderingAccuracy'))}")
+          f"{ci('yourSelfAgreementCi95')}   <- the ceiling "
+          f"({o.get('yourRepeatPairs', 0)} repeat pairs)")
+    print(f"   system vs you                   {pct(o.get('orderingAccuracy'))}"
+          f"{ci('orderingAccuracyCi95')}")
     if o.get("shareOfCeiling") is not None:
         print(f"   share of the ceiling captured   {pct(o['shareOfCeiling'])}")
-    print("   coin flip                        50.0%\n")
+    print("   coin flip                        50.0%")
+    if o.get("medianGapPoints") is not None:
+        # The log's §5.8 rule: an accuracy without its pair distribution is not a number. This draw
+        # is uniform over the set, so it is the easy end — near-tie draws score ~30 pts lower.
+        print(f"   pair draw: uniform over the set, median placed gap "
+              f"{o['medianGapPoints']:.2f} /10\n")
 
     g = o.get("resolvableGapPoints")
-    print(f"2. THE BAND — pairs closer than {g:.2f} /10 are the ones we claim not to resolve")
+    print(f"2. THE BAND — pairs closer than {g:.2f} /10 are the ones we claim *the population* "
+          f"does not resolve")
     print(f"   closer than that   {pct(o.get('accuracy_withinBand'))}"
-          f"  ({o.get('pairs_withinBand', 0)} pairs)  <- should be near chance")
+          f"  ({o.get('pairs_withinBand', 0)} pairs)")
     print(f"   further apart      {pct(o.get('accuracy_beyondBand'))}"
           f"  ({o.get('pairs_beyondBand', 0)} pairs)  <- should be high")
     if o.get("predictedAgreement") is not None:
         print(f"   agreement the curve predicted {pct(o['predictedAgreement'])}, "
-              f"observed {pct(o['observedAgreement'])}"
-              "  <- does T transfer off-cohort?")
+              f"observed {pct(o['observedAgreement'])}")
+    print("   Read these against the curve, not against 50%: T was fitted on panel *ballots*, so it")
+    print("   predicts a randomly drawn rater. One self-consistent rater beats that by construction,")
+    print("   so within-band accuracy above chance is expected. The failure to look for is a FLAT")
+    print("   curve below — no rise with the gap means the score cannot say when to trust it.")
+    for r in o.get("gapCurve", []):
+        print(f"     gap {r['gapLow']:5.2f}-{r['gapHigh']:5.2f}  n={r['pairs']:3d}   "
+              f"you {r['accuracy']:6.1%}   curve predicted {r['predicted']:6.1%}")
     print()
 
     if o.get("kendallTauVsYourBt") is not None:
@@ -423,8 +400,14 @@ def _print_report(o: dict) -> None:
         elif share > 0.9:
             verdict.append("ordering generalises off-cohort")
         else:
+            # Not "it degrades": that reading needs a comparable cohort-internal number, and a
+            # single rater's ceiling is a far harsher denominator than the panel's 74.9% crowd
+            # ceiling, so this ratio is not comparable to any share-of-ceiling in the log.
             verdict.append(
-                "ordering degrades on unseen faces — a model problem, not a labelling problem"
+                f"{o['orderingAccuracy']:.1%} against your own {o['yourSelfAgreement']:.1%} "
+                f"ceiling leaves {(1 - share):.0%} of the headroom on the table — real model error "
+                "on pairs you resolve consistently, but do not read it as 'degrades off-cohort' "
+                "without a cohort-internal number on this same pair draw and label source"
             )
     if o.get("yourRepeatPairs", 0) < 40:
         verdict.append(
