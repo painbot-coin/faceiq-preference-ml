@@ -842,3 +842,113 @@ zone. If it comes back above ~3 points, the wide bands are live and the buy zone
 **Answer: −0.9 [−2.1, +0.4] and −1.3 [−2.2, −0.5]. Dead money, and the second interval is entirely
 below zero — a purchased vote there is worse than the free label.** $14,367 cancelled; labelling stops at
 the 0–20 buy zone with $7,463 left in it. See log §5.8 and `panel-study-playbook.md` §2a.
+
+---
+
+## 10. Run 5 — the buy zone (fill this next)
+
+**This one is simple, and it is the first study bought purely to sharpen the ground truth.** Runs 2–3
+improved the ranking, run 4 measured it. Run 5 finishes the part of the export where a human vote is
+provably worth more than the free Gemini label: everything inside a **10-percentile-point** gap that
+nobody has rated yet.
+
+**Status: 🟡 DRAWN AND SHIPPED, not yet published (2026-08-04).** `labels/panel-run-5-buyzone/pairs.json`
+= **5,020 pairs = 5,000 new + the same 20 golds** with their original left/right sides. Already copied to
+`faceiq-rating/data/pairs.json`; `npx tsc --noEmit` clean and `npm run build` compiled, which executes
+`lib/pairs.ts`'s boot assertion.
+
+| band | pairs drawn | headroom over the free label |
+|---|--:|--:|
+| 0–2 | 886 | **+6.2** [+4.1, +8.3] |
+| 2–5 | 1,484 | **+6.2** [+4.4, +7.9] |
+| 5–10 | 2,630 | **+3.9** [+2.3, +5.6] |
+
+Median percentile gap **5.3**, 2,775 faces touched at **3.6 new comparisons each**, only 279 faces
+appearing once. Gender 2,500 / 2,500.
+
+### 10.1 The fields that change from run 4
+
+| Field | Run 5 value |
+|---|---|
+| Study name (participant-visible) | `Quick photo comparison task (~8 min)` |
+| Internal study name | `panel run 5 — 5,000 buy-zone pairs (0–10 gap) × 6 votes` |
+| Participants | **300** — still the representative-sample floor |
+| How long will your study take | **9 mins** — 105 screens, unchanged |
+| Reward | **$3.00** (= $20.00/hr at the stated 9 min) |
+| Add to participant group | create **`faceiq-panel-run5`** |
+| Block participants | exclude **`faceiq-panel-run2`**, **`faceiq-panel-run3`**, **`faceiq-panel-run4`**, and the soft-launch group |
+| Completion code | **generate a new one** and mirror it into `PROLIFIC_COMPLETION_CODE` in Vercel |
+| `CURRENT_STUDY_ID` | run 5's Prolific study id — `/api/monitor` `coverage` must read `{"0": 5000}` |
+| `PAIRS_PER_SESSION` | **100** — leave it |
+
+Everything else unchanged: **representative** US sample (Sex, Age, Ethnicity), desktop only, Decision
+making, manually review, **no auto-reject**, once per participant.
+
+| | |
+|---|--:|
+| Real pairs to cover | 5,000 |
+| Real votes per session | 100 |
+| Participants (Prolific floor) | 300 |
+| Votes collected | 30,000 |
+| **Votes per pair** | **6.00** |
+| Reward × 300 | $900.00 |
+| Prolific fee (42.86%) | $385.74 |
+| **Total** | **≈ $1,286** ($0.0429/vote) |
+
+### 10.2 Why 5,000 pairs at 0–10 rather than 2,642 at 0–5
+
+The ask was the first two bands, which is **2,642 unbought pairs** (969 at 0–2, 1,673 at 2–5) —
+drawn and kept at `labels/panel-run-5-close/` if you prefer it. It is the worse buy, **at identical
+cost**, and the reason is the 300-participant floor:
+
+| draw | pairs | votes/pair at 300 raters | new comparisons per face | faces seen once | cost |
+|---|--:|--:|--:|--:|--:|
+| 0–5 only | 2,642 | **11.4** | 2.2 | 808 | $1,286 |
+| **0–10 (shipped)** | **5,000** | **6.00** | **3.6** | **279** | **$1,286** |
+
+The floor fixes the spend at ~$1,286 whether we need the votes or not, so the only lever is how many
+pairs to spread them across — and §1's measurement is unambiguous that **breadth beats depth for
+improving the ranking**: at equal budget, 2,250 pairs × 6 votes beat 1,125 × 12 by 1.8 points. Eleven
+votes on a near-tie is past the point of usefulness; six is the measured sweet spot. The 0–10 draw hits
+**exactly 6.00**, covers a third validated band (+3.9 headroom), and nearly triples the number of faces
+that get more than one new comparison — which is the mechanism the gain actually travels through.
+
+After run 5 the buy zone has only **10–20** left: 7,247 pairs, ~$4,205 at 12 votes or ~$2,100 at 6.
+
+### 10.3 What this run is and is not for
+
+**It is for the ground truth, not for the comparator.** Log §5.8 measured the neural comparator
+*already beating* the ranking under a 10-point gap — these are the pairs it is best at — so do not
+expect run 5 to move the comparator much. What it moves is `bt-refit-vN`, which is the yardstick every
+model, formula and EBM in the programme is scored against, and which is the reference set a production
+score would be plotted onto. Buying it is buying a sharper ruler.
+
+Set the expectation before launch, per §6 item 0: **the deliverable is a better ranking in the 0–10
+band**, measured by `panel_run_delta.py` against the <1 point per $500 stop rule and by
+`refit_bt_panel.py`'s held-out gain in the `topup` strata. Run 3, the closest comparable study, returned
+1.24 points per $500.
+
+### 10.4 Launch sequence
+
+Identical to §9.4, with run 5's numbers:
+
+1. ✅ **Draw and ship** — done. `scripts/select_topup_pairs.py --max-gap 10 --n 5000`, copied to
+   `faceiq-rating/data/pairs.json`, `tsc` clean, `npm run build` compiled.
+2. **Deploy** and confirm the *production alias* serves the new file, not a preview build.
+3. **Create the Prolific study** from §10.1; generate a new completion code and mirror it into Vercel.
+4. **Set `CURRENT_STUDY_ID`** to run 5's study id and **redeploy** (env changes need one).
+   `/api/monitor` must read `coverage: {"0": 5000}` and `judgments: 0`. If it shows 2,500 you are still
+   serving run 4.
+5. **One `/?test=1` session** on `https://faceiq-rating.vercel.app`, then delete the test rows.
+6. **Publish.** Do not wipe the database — `CURRENT_STUDY_ID` scopes everything, and runs 2–4 are the
+   permanent human-GT test set.
+7. **On completion**, follow §9.5's pull-and-analyse sequence with run 5's paths. Note that
+   `rating_calibration.py` is **not** applicable this time: run 5's pairs are near-ties drawn on a
+   ranking, so they cannot serve as an unbiased calibration set the way run 4's uniform draw did.
+
+### 10.5 Before you publish — one gold to replace
+
+Run 4 retired `cmr1mr5cw06y796d59gfjfwv7` (63% over 78 views, third independent failure), so the set is
+effectively **19 sound golds**. The shipped `golds.json` still carries 20. Either drop it and ship 19, or
+top up from run 4's unanimous non-gold pairs with `scripts/replace_golds.py`. Nineteen is workable —
+raters see 5 each — but do not let it drift lower.

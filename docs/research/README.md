@@ -108,12 +108,13 @@ programme, measured: pay for the pairs machines cannot resolve, take the rest fo
 
 ### What is actually unknown (this is the bottleneck, and it is no longer ground truth)
 
-1. **Why the comparator is behind the ranking on typical pairs.** 67.4–67.7% vs 69.50% (paired −1.84 to
-   −2.09, both intervals below zero), with the deficit concentrated in the 10–45 percentile band. The
-   ranking recovers that ordering *from the same labels*, so this is an extraction failure — capacity,
-   schedule, loss shape, checkpoint selection, or 112 px input — not a data shortage. **Confirmed by
-   experiment 2026-08-04**: `train-v16` added run 4's wide-band votes, lifting panel coverage of the train
-   split from 14.7% to 19.4%, and the 10–20 band did not move. **More labels cannot fix it.** Log **§5.8**.
+1. ~~**Why the comparator is behind the ranking on typical pairs**~~ — **answered 2026-08-04, and the
+   answer changes the design.** Five arms (labels, targets, checkpoint selection, variance head, 4×
+   resolution) all tie at 1.8–2.1 pts behind BT with the 10–20 band stuck near 55% against 63.2%, and the
+   arm with *no* panel labels loses the same bands. BT solves a **global** system over 47,914 comparisons;
+   the comparator only sees **local** pairs and must induce an absolute function from 1,430 faces per
+   gender. **So stop asking it to reproduce the global ordering.** It beats BT under a 10-point gap — use
+   it there, and place new faces against the ranking (priority 1). Log **§5.8**.
 2. ~~**Test–retest stability**~~ — **deprioritised 2026-08-04 (product call).** It would need a second
    photo view per person exported from Labs, which does not exist for every face and is more overhead than
    it is worth right now. Consequence to accept knowingly: the "upload more photos, your band narrows"
@@ -131,13 +132,18 @@ programme, measured: pay for the pairs machines cannot resolve, take the rest fo
 | Priority | Task | Cost | Why it is ranked here |
 |---|---|---|---|
 | ~~1~~ | ~~Run `train-v16-panel-run4`~~ ✅ **done 2026-08-04 — and it confirmed the diagnosis by failing to help.** 67.43%, a tie with `train-v12` (+0.25 [−0.95, +1.46]), still **2.09 pts behind the ranking**, 10–20 band still 8.5 pts adrift | $2 of GPU | Panel coverage of the train split went 14.7% → 19.4% with the new pairs aimed at exactly the weak bands, and it changed nothing there. **The 10–45 deficit is now measured to be an extraction failure, not a label shortage** — no labelling programme can close it. Log §5.8 |
-| **1** | 🟡 **Fix the comparator's 10–45 band — three arms running 2026-08-04.** ✅ (a) checkpoint selection moved off `val_accuracy` onto a human-grounded `panel_val_accuracy`, verified against `eval_vs_panel` to 0.02 pts; 🟡 (b) `train-v17-panel-select` = v16 under the new rule; 🟡 (c) `train-v19-panel-variance` = the never-run variance head with panel labels; 🟡 (d) `train-v18-arcface-224` = resolution | **~$10 of GPU** | The ranking recovers this ordering from the same labels, so the information is provably there. This is the only thing standing between us and a shippable rating, and none of it needs new data. |
-| **1a** | **Gap-routed ensemble** — comparator under a 10-pt gap, ranking above it | **free** | Measurable today on the 631 leak-free run-4 pairs. §5.6 ruled out *global* blends; routing is a different operation and the band table is the first evidence for it. May solve the product problem without any training at all. |
-| **1b** | **Reference-set inference** — score a new face by comparing it against a fixed panel of cohort faces and reading off where it lands, instead of trusting the raw scalar | **free** | Uses the comparator the way it was trained (pairwise) rather than the way it is currently read (absolute), and is the most likely explanation for "the ranking looks off when I upload a face". |
+| ~~1~~ | ~~Fix the comparator's 10–45 band by training~~ ❌ **five arms, five ties, closed 2026-08-04.** More labels (v16), soft vs hard targets (v12/v13), fixed checkpoint selection (v17), a variance head (v19), and 4× resolution (v20/v21) all land 1.8–2.1 pts behind BT with the 10–20 band stuck near 55% against 63.2% | ~$15 of GPU | `train-v10`, which saw **no** panel labels, loses the same bands. BT solves a *global* system over 47,914 comparisons; the comparator only ever sees *local* pairs. It is not a tuning problem. Log **§5.8** |
+| **1** | **Ship the band as a tier** — `T = 1.920`, half-width `T·logit(agreement)/2` in percentile space, displayed as one of **~7 tiers**, at 2-in-3 agreement plus a 90% floor claim | **free** | p90 placement error is **0.93 /10** on the best checkpoint (the widely-quoted 1.33 came from a `val_fraction 0.5` arm — see below), so a point score still overclaims and this fixes its presentation for nothing. Two independent measurements say ~7 tiers, and 2-in-3 agreement is *exactly one tier down* (`T·ln2 / (9/7) = 1.035`), which settles the last open product call. |
+| **1a-new** | **Use `train-v14-panel-ship`, not the newest checkpoint** — and queue `train-v22-ship-0.2` | **free / ~$2 GPU** | New 2026-08-04. `scripts/placement_by_checkpoint.py --common-val` ranks checkpoints on *placement* error rather than val accuracy, scoring all of them on the same held-out faces. v14 places at **0.34 / 0.28** median /10 with **67%** tier-exact against **0.44–0.47** and **55–57%** for every v12–v21 arm — because those arms ran at `val_fraction 0.5` to hold out panel pairs and so trained on 13k pairs instead of 33k. They were controlled label-recipe comparisons, never production candidates. `train-v22-ship-0.2` combines v17's labels with v14's data volume and is the only cheap experiment left with obvious upside. |
+| **1a** | **Normalisation parity audit** — does the production upload path apply the exact faceiq-labs MediaPipe eye-level crop the cohort went through? | **free** | A per-face error that no ranking scheme cancels, and the cheapest real bug to rule out. **Largely answered 2026-08-04**: 644 real user uploads from today, pulled straight from labs blob storage, are 1024×1024 like the cohort, detect a face 25/25, and the normaliser moves them **7.85** mean abs pixel value against **7.66** for cohort photos. Same crop pipeline. Strong evidence rather than proof — equal residual magnitude is not a pixel-identical crop — but it demotes preprocessing as a suspect for odd upload scores. |
+| **1b** | **Wire reference-set placement into inference** — 200 stratified cohort faces of known θ, MLE for θ_new, `se` from the curvature | **free** | Buys the per-user standard error the band wants, a θ-scale position, and explicit handling of the ~16% of top-tier faces with no finite solution. Note it does **not** repair the score: a rank is already shift-invariant, so it matches the raw scalar's ordering (0.857 F). See `production-scoring-pipeline.md` §2–3. |
+| **1b-bis** | **Validate off-cohort** — ✅ **ready to judge, 2026-08-04.** Two queues built, 350 pairs + 35 repeats each, ~26 min apiece: `set-1-female` (82 clean faces) and `set-1-male` (601). **The audit is the story**: the id-level exclusion list was applied correctly and still let through **113 of 998 photos (11%) that are cohort people re-uploading** — invisible to ids, caught by ArcFace. Normalisation parity also confirmed on real uploads (7.85 vs 7.66) | **free** | **The only untested link in the chain.** Every accuracy figure in this log is measured against BT θ fitted on the same 3,000 faces the comparator trained on — honest about new *comparisons*, silent about new *faces from a different source*, which is all production sees. Separates ordering / band / calibration, and separates a fixable **scale shift** from an expensive **spread**. See `production-scoring-pipeline.md` §7 and log §6.3. |
+| **1c** | **Gap-routed ensemble** — comparator under a 10-pt gap, ranking above it | **free** | Measurable on the 631 leak-free run-4 pairs. §5.6 ruled out *global* blends; routing is a different operation. Caveat: at inference the true gap is unknown, so measure the oracle-routed ceiling first and drop it if that is small. |
+| **1d-new** | **Multi-photo narrowing is buildable now** — and the photo band has its first measurement | **free** | New 2026-08-04, log **§5.9**. The cohort was believed to be one photo per person, which is why this was shelved; it is not. It contains **363 people photographed two or more times**, i.e. a test–retest set we already owned. Scored through `bt-refit-v5-panel`, the same person's two photos land **0.65 /10 apart at the median, 1.54 at p90** — so photo-to-photo spread *exceeds* the model's own p90 placement error of 0.93, and asking a user for a second photo is worth more than another 0.1 /10 out of the comparator. |
 | **2** | **Ship bands, not decimals** — temperature-scale against §5.8's curve, then define the band policy | free | Now fully specified by measurement: 0.25 /10 is a coin flip, 2 points is 83%, and the point score is overconfident by 26 pts. See `programme-direction-review.md` §5 for the band maths. |
 | **3** | **Anchor-ladder decision** (§5.4) | free | Decides whether top faces can exceed 8/10. This is the thing that reads as "the ranking is wrong". Product call. |
 | **4** | **Landmarks → EBM** for explainable per-feature contributions | **~free** | Labs already stores `Face.frontLandmarks` / `mediapipeLandmarks` on every upload — no extraction project and no inference-path problem. The only work is adding the columns to `export-gt-run.ts`'s `select` and pinning point order. See §5.7. |
-| **5** | **The 0–20 buy zone, in tranches** — 12,862 unlabelled pairs | **~$7,463** | Still validated spend (+3.6 to +6.2 pts, all four intervals clear of zero) but **deferred behind priority 1**: it improves a ranking the product does not ship, and priority 1 decides whether the comparator can even use it. Cheapest-first: 0–2 $563 → 2–5 $971 → 5–10 $1,724 → 10–20 $4,205. |
+| ~~5~~ | ~~**The 0–20 buy zone**~~ — 12,862 unlabelled pairs | ~~$7,463~~ | ⛔ **CLOSED 2026-08-04. Both routes measured shut on the same day.** The labels are still genuinely better than the free ones (+3.6 to +6.2 pts headroom, all intervals clear of zero) — that was never the question. `ranking_value_to_placement.py`: swapping the ranking supplying reference θ from zero human votes to all 65,894 moves the production score **0.2 pts, downward** (θs enter with weight ≤0.25 each over 200 references, so they average out). `train-v22-ship-0.2`, v17's label recipe at v14's data volume: **+0.00 pts [−0.96, +0.96]** against human votes. So label quality reaches a user's score through neither the reference set nor the comparator's training set. **Label quality has stopped being the binding constraint.** Reopening needs a different *kind* of label — test–retest, or a demographically different panel — not more pairs from the same pool. |
 | ~~6~~ | ~~Human votes above a 20-point gap~~ | ~~$15,328~~ | ❌ **Cancelled 2026-08-04.** Headroom is negative on an unbiased sample; at 45–100 the whole interval is below zero. $14,367 saved. |
 
 **Ruled out by measurement, do not revisit without new evidence:** buying human votes above a 20-point
@@ -183,7 +189,7 @@ Earlier plans now live in [`archive/`](./archive/README.md).
 
 ## What each doc is for
 
-**Ten live docs.** Everything else is in [`archive/`](./archive/README.md).
+**Eleven live docs.** Everything else is in [`archive/`](./archive/README.md).
 
 | Document | Role | When to open it |
 |----------|------|-----------------|
@@ -239,6 +245,7 @@ not sequential reading. If a doc's status line goes stale, fix it in the same ch
 |----------|---------|
 | [`scoring-gt-core.md`](./scoring-gt-core.md) | Canonical plan — phases, 3k × 35, BT, VLM consensus |
 | [`scoring-gt-research-log.md`](./scoring-gt-research-log.md) | Living log — record at gates; artifact pointers |
+| [`production-scoring-pipeline.md`](./production-scoring-pipeline.md) | The shipping pipeline — built / measured / blocked, in order |
 | [`programme-direction-review.md`](./programme-direction-review.md) | Strategy — direction, stop rules, plan B, band maths |
 | [`vlm-pilot-spec.md`](./archive/vlm-pilot-spec.md) | Pairwise admin + pilot (done) + §15 scale batch |
 | [`scoring-gt-schema.md`](./scoring-gt-schema.md) | DB map + migrations before scale |
@@ -259,6 +266,12 @@ not sequential reading. If a doc's status line goes stale, fix it in the same ch
 | **Human panel** | Per-study results, rater QC, the "was it worth the money" ladder and dose curve, and the **two-accuracies** explainer (majority-level vs vote-level — read it before quoting any figure) |
 | **Score bands** | The fitted agreement curve against the raw observed points, `T = 1.920`, a score → band widget with the product sentence, and a live model of multi-photo narrowing with `σ_photo` and `ρ` as sliders |
 | **Label spend** | The buy/skip band table with intervals, the $7,463 / $14,367 split, and the three independent methods that agree on the boundary |
+| **Inference** | Reference-set placement for an uploaded photo (tier, band, placed /10, per-user `se`), a **browser for the whole reference set** in θ order with per-tier counts, the **Labs composite** side-by-side with its measured verdict, and the **off-cohort validation labeller** |
 | BT rankings / Refit diagnostics | Per-face scores, gates, stability, anchor curve |
 | Training runs / Model inspection / Model gallery | Per-run histories, checkpoint scores, visual cross-checks |
 | Composite | The measured negative result on blends |
+
+The **Anchor panel** tab was removed 2026-08-04 along with `src/faceiq_pref/anchors.py`. It was the
+§5.4 Path A idea — hand-assign /10 scores to a few faces and place photos on that ladder — and it is
+superseded by reference-set placement, which uses 200 faces with *measured* θ and no hand-assigned
+scores. Scale-level corrections belong in the anchor curve, not in per-face judgments.

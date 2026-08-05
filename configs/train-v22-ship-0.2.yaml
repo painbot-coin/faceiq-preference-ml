@@ -1,0 +1,63 @@
+# The shippable model: v17's label recipe at v14's data volume.
+#
+# Identical to configs/train-v17-panel-select.yaml except `val_fraction: 0.5 -> 0.2`, which raises
+# training pairs from 13,113 to ~33,449.
+#
+# Why this run exists. Every arm from v12 to v21 ran at val_fraction 0.5 on purpose: that is what
+# holds out enough panel pairs (~2,548 rather than ~330) to compare label recipes against real human
+# votes with a usable interval. Those runs are therefore *controlled comparisons*, not candidates for
+# production, and the log said so at the time. `scripts/placement_by_checkpoint.py` cashed that
+# warning out on 2026-08-04: scored on the same held-out faces, `train-v14-panel-ship` (the one arm
+# trained at 0.2) places at 0.34 / 0.28 median /10 error with 67% tier accuracy, against 0.44-0.47 and
+# 55-57% for every 0.5-split arm. A ~0.13 /10 gap and 10 points of tier accuracy, entirely from having
+# 2.5x the training pairs.
+#
+# So the two ingredients we know help have never been combined. v14 has the data volume but the older
+# label recipe (panel runs 1 and 3 only, hard targets). v17 has the better recipe (run 4 folded in,
+# soft vote-share targets, checkpoint selected on human agreement) at half the data. This is both.
+#
+# What success looks like: median placement error below 0.34 and tier accuracy above 67% on
+# `scripts/placement_by_checkpoint.py --common-val`. Note the honest expectation is a *small* win --
+# the label-recipe arms differed by ~0.3 pts among themselves, so most of v14's advantage is data
+# volume and this run mostly re-buys that. The reason to run it anyway is that it costs ~$2 and step 3
+# of the ship order otherwise ships a model built on a label recipe we superseded.
+#
+# What this run CANNOT tell us, and do not let it: panel accuracy is not comparable to v12-v21.
+# At val_fraction 0.2 only ~330 panel pairs are held out, so `panel_val_accuracy` here carries a
+# ~+-5.5pt interval and is a smoke check, not a comparison. Judge this run on PLACEMENT error against
+# the common val split, which is the production question and is comparable across every run.
+#
+# Run: FACEIQ_ARMS="train-v22-ship-0.2" scripts/sync_panel_to_gpu.sh <ip>
+# Then: python scripts/placement_by_checkpoint.py --common-val
+
+export_dir: data/exports/cmr1mr0m7000196d57zi3vcgn
+run_name: train-v22-ship-0.2
+
+backbone: arcface_r50
+freeze_backbone: false
+image_size: 112
+batch_size: 32
+epochs: 10
+lr: 0.00001
+weight_decay: 0.0001
+
+# The only line that differs from v17. split_seed stays at 42 so the 0.2 val faces remain a subset
+# of every other run's val faces, which is what makes placement_by_checkpoint.py's --common-val
+# comparison valid.
+val_fraction: 0.2
+split_seed: 42
+num_workers: 4
+skip_ties: true
+augment: true
+
+panel_labels:
+  - [labels/panel-pilot/results, labels/panel-pilot/sample-meta.json]
+  - [labels/panel-run-3/results, labels/panel-run-3/sample-meta.json]
+  - [labels/panel-run-4-random/results, labels/panel-run-4-random/sample-meta.json]
+panel_rejects:
+  - artifacts/panel-run-v1/reject-pids.txt
+  - artifacts/panel-run-v3/reject-pids.txt
+  - artifacts/panel-run-v4/reject-pids.txt
+panel_min_votes: 4
+panel_prior: 1.0
+panel_hard: false

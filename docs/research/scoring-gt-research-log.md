@@ -2214,12 +2214,199 @@ it without a new experiment** (`scripts/rank_resolution.py`, new, over
     carries the `notIdentified` / `lowInfoOpponents` flags in `uncertainty.csv`. Check those columns before
     concluding a face is mis-ranked.
 
+#### Five arms, none of which closed the 10–45 band (2026-08-04)
+
+Decision 3 said the comparator's mid-gap deficit was an *extraction* failure. Five arms then attacked it
+from five directions. **All five are ties**, and the pattern is now the finding rather than any individual
+result. Population accuracy on run 4's pairs, all vote-level, all paired over the identical 631-pair
+leak-free subset (`artifacts/panel-arms-compare-run4.json`, `artifacts/resolution-compare-run4.json`):
+
+| arm | what it changed | population accuracy | vs BT (paired) |
+|---|---|--:|---|
+| `train-v10` | control — VLM labels only | 66.47% | −3.05 [−4.70, −1.48] |
+| `train-v13` | hard panel target | 66.93% | −2.59 [−4.19, −1.05] |
+| `train-v19` | **variance head** (never run before) | 67.39% | −2.11 [−3.63, −0.57] |
+| `train-v16` | **+ run 4's votes** (coverage 14.7% → 19.4%) | 67.43% | −2.09 [−3.61, −0.55] |
+| `train-v17` | **checkpoint selection fixed** | 67.63% | −1.89 [−3.49, −0.32] |
+| `train-v12` | soft panel target | 67.67% | −1.84 [−3.38, −0.31] |
+| — | | | |
+| `train-v20` | resnet50 @ **112** px | 64.11% | −5.40 [−7.32, −3.51] |
+| `train-v21` | resnet50 @ **224** px | 64.27% | −5.23 [−7.14, −3.40] |
+| **BT `bt-refit-v2-qc`** | | **69.50%** | — |
+| ceiling (another rater) | | 69.90% | — |
+
+The 10–20 band, which is the specific deficit: v12 56.8%, v16 54.7%, v17 55.7%, v19 54.6%, v20 56.0%,
+v21 53.5% — against BT's **63.2%**. Nothing moved it.
+
+27. **Resolution is ruled out, and this was the last perceptual hypothesis.** The source photos are
+    **1024 × 1024**, so 112 px uses ~1.2% of the available pixels — the hypothesis was live. A matched pair
+    varying nothing but `image_size` gives **64.11% vs 64.27%, a tie (−0.15, CI [−2.07, +1.78])**, and on
+    the 10–20 band 224 px is *worse* (53.5% vs 56.0%). Note the direction: 224 px did help slightly on the
+    near-tie-dominated training metric (`panel_val_accuracy` 0.5674 → 0.5756) and not at all on the wide
+    bands, which is the opposite of what a detail-limited mid-gap would predict.
+    *(Recorded separately: `arcface_r50` **cannot** take 224 px — its converted ONNX graph ends in a fixed
+    `Linear(25088, 512)` sized for a 7×7 feature map. Hence the resnet50 pair. resnet50 is a weaker
+    backbone in absolute terms, so these two arms are comparable only to each other.)*
+28. **The variance head learned score-dependent uncertainty, not photo quality.** σ does vary (0.42 to
+    1.85, CV 0.22, so it did not collapse) but it correlates **+0.52 with the /10 score** — it learned that
+    the thin top of the ranking is poorly determined, which is true. Regress that out and the residual is
+    flat across every photo-quality flag the QC pass recorded: obstruction −0.027, poor_lighting −0.015,
+    low_resolution −0.005, no-issues +0.003, against a σ sd of 0.169. **So this does not give the
+    per-photo σ the multi-photo band needs.** The plausible fix if we return to it is training with
+    quality augmentation (random blur, downsampling, lighting jitter) so degradation is actually in the
+    signal; without it there is nothing for σ to attach to.
+29. **The converging read.** Five failures across labels, targets, selection, uncertainty modelling and
+    resolution — plus the fact that `train-v10`, which saw **no** panel labels at all, loses the same
+    bands — say this is not a tuning problem. BT solves a **global** system over 47,914 comparisons; the
+    comparator sees only **local** pairs and must induce an absolute function from them, on 1,430 faces
+    per gender. **The likely conclusion is that the comparator should not be asked to reproduce the global
+    ordering at all.** Ask it for local comparisons, which it is measurably good at (it beats BT under a
+    10-point gap), and take the global ordering from BT via reference-set placement. That reframes the
+    "deficit" as a design error in how the model is *read*, not a defect in the model — see the next
+    section, which was measured before this conclusion was reached.
+
+#### Reference-set inference — how a new face should actually be placed (2026-08-04)
+
+The comparator is *trained* pairwise and *read* as an absolute score. A siamese network's output has no
+anchored zero and no anchored scale, because only differences enter the loss, so any bias shift — or any
+distribution shift between cohort photos and a user upload — moves every score together while changing not
+one pairwise comparison. That is the most likely reason an upload scores oddly while pairwise accuracy
+looks fine, and it is a *placement* failure rather than an *ordering* failure.
+
+`scripts/reference_set_inference.py` (new) uses the model the way it was trained: compare the new face
+against N cohort faces of known θ and fit `P(new beats ref_j) = σ(θ_new − θ_j)` by maximum likelihood. The
+problem is one-dimensional and strictly concave, so Newton converges in a few steps and the curvature at
+the optimum gives a standard error for free, `se(θ) = 1/√Σ p_j(1−p_j)`.
+
+Measured with `train-v16`, subjects being **val-split faces the model never saw** and references being
+seen faces — exactly the production arrangement (`artifacts/train-v16-panel-run4/reference-set.json`):
+
+| references | Spearman vs BT (F / M) | median error /10 | p90 error /10 | se(θ) |
+|---|--:|--:|--:|--:|
+| **raw scalar (what we do today)** | **0.857 / 0.830** | — | — | — |
+| 10 | 0.845 / 0.820 | 0.80 | 1.85 | 1.03 |
+| 25 | 0.853 / 0.817 | 0.57 | 1.57 | 0.71 |
+| 50 | 0.857 / 0.827 | 0.54 | 1.41 | 0.48 |
+| **200** | **0.857 / 0.831** | **0.53** | **1.33** | **0.24** |
+| 707 / 732 (all available) | 0.857 / 0.830 | 0.53 | 1.33 | 0.13 |
+
+23. **~200 references is the operating point.** Ordering accuracy plateaus by 50 and is flat to 700; past
+    200 only `se` keeps shrinking, and `se` is estimation precision, not accuracy — the error floor is
+    **0.53 /10 median, 1.33 p90** whatever the set size, which is the *comparator's* limit rather than the
+    reference set's. Using the whole 2,866-face ranking is defensible and costs 14× the forward passes for
+    nothing measurable.
+24. **10–20 references is genuinely too few** — 0.845 vs 0.857 Spearman and 0.80 vs 0.53 median error. The
+    original "reference panel of 10–20" sketch would have underperformed the raw scalar it was meant to fix.
+25. **No curation is needed, and curating would be worse.** Each reference's weight in the fit is
+    `p_j(1−p_j)`: 0.25 for an evenly-matched opponent, collapsing toward zero for a mismatch. The set
+    self-selects toward faces near the subject, so a hand-picked ladder adds selection bias and buys
+    nothing a stratified sample of the whole ranking does not already give. This also disposes of the worry
+    that hand-picking "who is an 8" would bake in one person's taste.
+26. **Discarding the scalar's magnitude costs nothing.** The fit uses only the *sign* of each comparison
+    and still matches the raw scalar on Spearman. So the anchoring is free — same ordering, plus a
+    calibrated position on the cohort scale and a standard error the band can use.
+
+**What this measurement cannot show, and it is the important caveat.** Both methods were scored on
+*cohort* faces. The raw scalar's hypothesised failure is distribution shift on *user uploads*, which
+cannot be simulated without uploads of known ground truth. So reference-set inference is proven **not
+worse** and proven to need only ~200 references; its benefit on real uploads is untested. Ship it as free
+insurance against a failure mode we cannot currently measure, not as a measured win.
+
+**Two further measurements that decide the engineering** (same script, per-gender output):
+
+`se(θ)` converted to the /10 scale — the estimation band a 200-face reference set actually produces:
+
+| position | /10 | estimation half-width | disagreement half-width at 2-in-3 |
+|---|--:|--:|--:|
+| p25 | 3.99 | ±0.08 | ±0.67 |
+| median | 5.00 | ±0.14 | ±0.67 |
+| p75 | 6.10 | ±0.10 | ±0.67 |
+| p90 | 7.00 | ±0.07–0.11 | ±0.67 |
+
+30. **Estimation uncertainty is ~5× smaller than human disagreement, so reference-set size is
+    optimising the wrong term.** Composed in quadrature, `√(0.14² + 0.67²) = 0.68` — the estimation
+    part contributes 0.01 of the total. That is both why 200 is enough and why the band is honest: its
+    width is a property of the world, not of our sample size.
+
+Placement quality by where the subject sits (200 references):
+
+| subject band | median error /10 | p90 | no finite MLE |
+|---|--:|--:|--:|
+| bottom 25% | **0.92** F / 0.76 M | 1.88 | 0% |
+| middle 50% | **0.41** F / 0.50 M | 1.01 | 0% |
+| top 25–5% | 0.51 / 0.62 | 1.28 | 0% |
+| **top 5%** | 0.87 / 0.64 | 1.92 | **15.8% (F)** |
+
+31. **Placement is twice as accurate in the middle of the scale as at either end, and more references
+    do not fix it** (the same table at all 707 references is unchanged). Two production consequences:
+    the band must **widen at the extremes** rather than being a constant width — use the per-user
+    `se(θ)` the fit already returns — and ~16% of top-5% female faces **beat every reference**, which
+    has no finite MLE. Cap θ at the top reference plus a margin and flag it rather than letting the
+    optimiser run away.
+
+**A full BT refit per user is unnecessary — it is the same estimator.** Adding the user as a new node
+and re-solving while holding the existing 47,914 edges fixed *is* the conditional MLE, which is
+`fit_theta`. Letting the 2,866 reference θ float too would move them by roughly 200/47,914 ≈ 0.4%,
+numerically irrelevant, at the cost of a full refit per upload instead of one 1-D Newton solve. Keeping
+the reference θ fixed is also what keeps every user on one comparable scale.
+
+**Do not hand-label the reference faces out of 10.** It substitutes one person's anchors for 95,245
+measured votes, discards the θ scale's metric structure, and is redundant with the pre-registered
+percentile→/10 curve. If the intent is to change *what a 7 means*, change that curve — one function,
+the §5.4 anchor-ladder decision — not 200 individual judgments. Curating for "a clean progression" is
+also picking noise: 0.00% of adjacent pairs are distinguishable (measurement 20).
+
+**Reference *spread* matters, reference *quality* does not.** Median placement error in /10 by
+selection rule (715 F / 712 M unseen subjects):
+
+| reference selection | female | male |
+|---|--:|--:|
+| random 200 | 0.544 | 0.573 |
+| **stratified 200 — even across 8 percentile bands, random within** | **0.516** | **0.514** |
+| stratified 200, tightest θ interval within band | 0.524 | 0.543 |
+| stratified 200, most **panel** votes within band | 0.549 | 0.555 |
+| stratified 200, most total comparisons within band | 0.541 | 0.536 |
+| all 707 / 732 | 0.514 | 0.551 |
+
+32. **Do not filter the reference set to panel-covered or well-measured faces.** Stratifying across the
+    score range buys 0.03–0.06 /10; selecting for measurement quality buys nothing and selecting for
+    panel votes is marginally *worse*. Expected on reflection: each reference's θ enters as a fixed
+    constant with weight at most 0.25 spread over 200 references, so individual θ errors average out,
+    while panel-covered faces are exactly those drawn into near-tie pairs — selecting them concentrates
+    references in dense parts of the scale and costs the coverage that does matter.
+
+**Correction to measurement 26's framing.** It said the raw scalar's problem is that it is unanchored.
+That is weaker than stated: the dashboard's Inference tab already computes a **rank** within the
+model's own score distribution (`(cohort_scores < user_score).mean()`), and a rank is
+**shift-invariant** — a global bias shift changes nothing. Which is also why reference-set placement
+matches the raw scalar's Spearman almost exactly: both are monotone functions of the same rank. So what
+it buys is narrower than "fixes the score" — a principled per-user **standard error** (the tab gives a
+point estimate with none), a position on the interpretable **θ** scale, explicit handling of the ~16%
+of top-tier faces with no finite solution, and 200 forward passes instead of 2,866. The likelier causes
+of an odd-looking upload score, in order, are: **the point score being shown at all** when p90 error is
+1.33 /10; **normalisation parity** with the faceiq-labs MediaPipe crop, which is a per-face error no
+ranking cancels; and genuine model error, worst at the extremes.
+
+**One reference set, not one per subgroup or per photo condition.** The set's job is to locate a face on
+the *existing* cohort percentile scale; splitting it by ethnicity or by lighting would define a different
+scale per group, so a user's score would depend on which set they were compared against and two users
+would not be comparable. Photo condition is real but belongs on **σ, not the yardstick**: a poor photo
+should widen the band, which is what `variance_head` (`train-v19`) is for. Make the set representative of
+the cohort, stratify it across the score range, and audit win rates by subgroup rather than engineering
+separate scales.
+
 #### Artifacts
 
 | What | Where |
 |---|---|
 | Raw archive (gitignored) | `labels/panel-run-4-random/results/{judgments,sessions}.jsonl` — 31,237 + 303 rows |
 | `train-v16` (run 4 in the loss) | `configs/train-v16-panel-run4.yaml` · `artifacts/train-v16-panel-run4/{metrics,panel-eval,panel-eval-run4}.json` · 67.43%, a tie with v12 |
+| **Reference-set inference** | `scripts/reference_set_inference.py` → `artifacts/train-v16-panel-run4/reference-set.json` · ~200 refs is the operating point; 0.53 /10 median placement error |
+| **Production placement** | `src/faceiq_pref/placement.py` — the shipping form of the above: θ, `se`, percentile, /10, band, tier, plus tier-stratified reference sampling and `ANCHORS_TOP10`. Wired into the dashboard's Inference tab |
+| **Off-cohort validation harness** | `scripts/validate_placement.py` (+ Inference tab labeller) · built and smoke-tested 2026-08-04, **unrun — needs 50–100 photos from outside faceiq-labs.** Separates ordering / band / calibration, and scores against the labeller's own repeat rate rather than against 100%. See production-scoring-pipeline §7 |
+| **Checkpoint choice for production** | `scripts/placement_by_checkpoint.py` → `artifacts/placement-by-checkpoint.json` · **`train-v14-panel-ship` wins by a wide margin** — see the note below |
+| **Labs composite** | `scripts/labs_composite_eval.py` → `artifacts/<run>/labs-composite.json` · **do not blend** — improves the BT proxy, not human agreement |
+| **Value of ranking quality to the score** | `scripts/ranking_value_to_placement.py` → `artifacts/ranking-value-to-placement.json` · **flat across the whole refit ladder** — see below |
 | **Rank resolution** | `scripts/rank_resolution.py` → `artifacts/bt-refit-v4-panel/rank-resolution.json` · 0% of adjacent pairs distinguishable; ~210 places for a real difference; ~7 supported tiers per gender |
 | Rater QC, bands, golds | `artifacts/panel-run-v4/{raters.csv,majority-labels.csv,reject-pids.txt,prolific-rejections.txt}` |
 | **Honest calibration** | `artifacts/panel-run-v4/calibration.json` — run before any refit consumed run 4 |
@@ -2243,11 +2430,210 @@ curve alone, since it does not need the 300-participant representative floor).
 recorded `qcExcludedFaces: 0` in `metrics.json`. Gates still passed, which is what makes it dangerous.
 Check that field on every refit; better, give the arguments the same defaults `eval_vs_panel.py` uses.
 
+**We were about to ship the wrong checkpoint, and `bestValAccuracy` is why.** Ranking every checkpoint
+on *placement* error — the production question — instead of on val accuracy inverts the ordering.
+`scripts/placement_by_checkpoint.py --common-val` scores every run on the same held-out faces (the
+`val_fraction 0.2` split, a subset of the 0.5 split under a shared seed, so genuinely held out for all
+of them):
+
+| checkpoint | median /10 err F / M | p90 | tier exact | Spearman |
+|---|--:|--:|--:|--:|
+| **`train-v14-panel-ship`** | **0.34 / 0.28** | **0.93** | **67.2%** | **0.926** |
+| `train-v19-panel-variance` | 0.47 / 0.39 | 1.20 | 56.6% | 0.875 |
+| `train-v13-panel-hard` | 0.44 / 0.42 | 1.28 | 55.3% | 0.867 |
+| `train-v12-panel-soft` | 0.45 / 0.43 | 1.27 | 55.9% | 0.868 |
+| `train-v17-panel-select` | 0.47 / 0.47 | 1.26 | 57.2% | 0.869 |
+| `ensemble-v7-v1` | 0.47 / 0.47 | 1.17 | 60.7% | 0.898 |
+
+The cause is not subtle and was flagged in §6.4 before it was measured: **v14 is the only panel arm
+trained at `val_fraction: 0.2`**, so it saw 33,449 pairs against the others' 13,113. Every v12–v21 arm
+ran at 0.5 deliberately, to hold out ~2,548 panel pairs rather than ~330 for the human-grounded
+comparison. That made them controlled comparisons of *label recipes* and never production candidates.
+Ten points of tier accuracy and 0.13 /10 of placement error is what the 0.5 split cost, and it went
+unnoticed because no arm was ever scored on placement.
+
+Two corrections follow. **The "p90 placement error is 1.33 /10" figure quoted across the docs was
+measured on a 0.5-split model; on v14 it is 0.93** — still wide enough that a point score overclaims,
+so the band argument stands, but the number was pessimistic by ~30%. And **the best label recipe has
+never been trained at 0.2**: `configs/train-v22-ship-0.2.yaml` is v17's recipe at v14's data volume,
+~$2 of GPU, and it is the last cheap experiment with an obvious upside.
+
+**Blending the placed score toward its tier's mean is a measured no-op, and the reason is instructive.**
+Proposed as a way to let a few mis-ranked reference faces wash out. On 499 held-out faces with v14,
+median error moves 0.319 → 0.314 at a 70/30 blend and tier-exact accuracy does not move at all (67.3%
+at every weight, because averaging toward a tier's own mean never moves anyone out of that tier).
+Splitting by whether the tier was right shows the mechanism: where the tier is correct the blend helps
+(0.226 → 0.192) and where it is wrong it hurts (0.646 → 0.719), and at 67% tier accuracy those cancel.
+It is a bet on the tier assignment, and it imports the mis-ranked faces through the tier mean rather
+than washing them out. The formal version — empirical-Bayes shrinkage toward the *population* mean,
+which does not depend on the tier being right — moves θ by 0.3% at `se = 0.24` against a population θ
+variance of 14.7–17.7. Correct, principled, negligible. The composite the proposal wanted is already
+what the MLE computes.
+
+**A better ranking does not make a better score, and that reroutes the entire spend argument.**
+`scripts/ranking_value_to_placement.py` holds the comparator fixed at `train-v14-panel-ship` and swaps
+only the ranking supplying reference θ, walking the refit ladder from zero human votes to all 65,894:
+
+| ranking supplying reference θ | panel runs in it | vs majority | vs votes |
+|---|---|--:|--:|
+| `bt-refit-v2-qc` | none (VLM only) | 82.1% | 70.9% |
+| `bt-refit-v3-panel` | run 1 | 82.1% | 70.9% |
+| `bt-refit-v4-panel` | runs 1+3 | 82.1% | 70.9% |
+| `bt-refit-v5-panel` | runs 1+3+4 | 81.9% | 70.8% |
+
+Spread across the ladder: **0.2 points, downward.** The bias ran toward finding an effect — run 4's
+votes are inside v5, so evaluating v5 on run 4 pairs is partly in-sample. The mechanism is the same
+`p(1−p)` weighting that makes reference curation pointless: θs enter as fixed constants with weight at
+most 0.25 each over 200 references, so improvements average out and the comparator's ordering dominates.
+
+That left exactly one route for ground-truth spend to reach a user's score — the comparator's
+**training set** — and `train-v22-ship-0.2` tested it the same afternoon. v17's label recipe (soft
+panel targets, run 4 folded in, human-grounded checkpoint selection) at v14's data volume:
+
+| checkpoint | median err F / M | tier exact | Spearman | **vs panel majority** |
+|---|--:|--:|--:|--:|
+| `train-v14-panel-ship` | 0.34 / 0.28 | 67.2% | 0.926 | **81.7%** |
+| `train-v22-ship-0.2` | 0.35 / 0.30 | 68.7% | 0.937 | **81.7%** |
+
+**+0.00 pts, 95% CI [−0.96, +0.96]** on a paired bootstrap over 2,390 pairs. A dead tie, which means
+essentially all of v14's advantage over the 0.5-split arms was **training-pair count, not label
+quality**. (The two trade small wins on the BT-proxy columns; per the rule below those do not count,
+and the two checkpoints are interchangeable.)
+
+**Both routes are therefore measured shut, and the $7,463 buy zone is closed.** The headroom table
+remains correct that a purchased vote beats the free label on those pairs — label quality has simply
+stopped being the binding constraint. Scope: v14 already contains panel runs 1 and 3, so this tests
+the *increment*, not whether panel labels help at all; §5.3.1 measured +2.00 pts for wiring them in
+the first time. The programme was right to buy them and is now past the point where more of the same
+pays. Reopening would need a different *kind* of label — test–retest pairs, or a demographically
+different panel — not more pairs from the same pool.
+
+**The Labs composite is the cleanest example of proxy-chasing this programme has produced, and it
+nearly shipped.** `scripts/labs_composite_eval.py` blends the Labs deterministic score into the placed
+/10 post-hoc, at weight `w` on the comparator:
+
+| w on comparator | BT median err | BT tier exact | vs panel majority | vs panel votes |
+|--:|--:|--:|--:|--:|
+| **1.00 (placement only)** | 0.319 | 67.3% | **81.9%** | **70.8%** |
+| 0.85 | **0.283** | **69.9%** | 81.7% | 70.8% |
+| 0.80 | 0.295 | 69.5% | 81.5% | 70.7% |
+| 0.00 (Labs only) | 0.652 | 42.9% | 71.7% | 64.6% |
+
+Against **BT** it is a clear win: median error down 11%, tier accuracy up 2.6 points, bootstrap CI
+`[+0.032, +0.061]` excluding zero, and it replicates on `train-v12-panel-soft` (55.9% → 60.3% tier).
+Against **real human votes** it is flat to slightly worse at every weight. The error correlation
+between the two sources is **+0.008** — essentially independent, normally the exact condition for a
+blend to pay, and the reason the BT result is so persuasive.
+
+Both cannot be improvements. BT θ is a proxy fitted on Gemini labels; the panel votes are the target.
+A change that moves the proxy and not the target is fitting the proxy's error. Had only the first
+measurement been run, a "statistically significant 11% improvement" would have gone into the pipeline
+and helped nobody. **Standing rule from here: any composite, ensemble or post-hoc adjustment is scored
+against panel votes before it counts. BT-target numbers are for debugging.**
+
+This is weak evidence about the EBM, whose input is genuinely different, but the bar is now explicit
+and the harness exists: beat 81.9% / 70.8% on panel votes.
+
+**The user-facing sentence had to be rewritten, and the bug was in the copy rather than the maths.**
+The first version read *"67% of people would place you above someone scoring 3.8"*, which is
+arithmetically exact and reads as though some raters think the face **is** a 3.8. It does not: 3.8 is a
+different, lower-scoring face one resolvable gap down. Replaced by `agreement_vs_tier_below()`, which
+compares against a typical face in the tier below and reports the *exact* share for that score (~62% at
+the bottom of a tier, ~71% at the top) rather than always saying "two thirds". Recorded because it is
+the general failure mode of shipping a calibrated quantity: the number was right and the sentence built
+on it implied something we never measured.
+
+**Reference sets are per-gender and cannot be pooled.** The pair queue was same-gender only, so the two
+BT graphs are disconnected by construction and their θ scales share no common zero — every placement
+draws references of the subject's own gender, and every /10 is a position within that gender's cohort.
+The Inference tab now has a browser for the whole selected reference set in θ order, grouped by tier,
+which also makes the top-tier thinness (~14 faces per gender) visible as the mechanism behind the
+unbounded-MLE rate.
+
 **Three raters volunteered task-validity observations worth keeping.** One asked whether "Skip" or "Save
 & Continue" was correct for a tie (a UI ambiguity, same family as run 3's tie-button wording); one wrote
 *"quite a few where neither seemed attractive — just a matter of personal taste"*, which is the honest
 description of a uniform draw and not a complaint; one wrote *"this was disturbing"*, worth noting for the
 ethics section of any write-up.
+
+---
+
+### 5.9 The cohort is not 3,000 people — duplicate identities, and the test–retest set we already owned (complete, 2026-08-04)
+
+Found while building the off-cohort validation set, not by looking for it. To check whether the new
+labs photos contained anyone from the cohort, both sides were embedded with **ArcFace R50**
+(`buffalo_l w600k`, a face *recognition* model, so it measures who someone is rather than what they
+look like). The threshold was to be calibrated off the cohort's own pairs on the assumption that
+3,000 faces are 3,000 different people. The largest such similarity came back **1.000**.
+
+**The cohort contains the same person more than once.** Two independent readings, one of which needs
+no threshold at all:
+
+| measure | result |
+|---|---|
+| **byte-identical image files** (sha256, no model involved) | **35 groups, 73 rows** — the same file stored under 2–3 different `sourceFaceId`s |
+| complete-linkage identity clusters at cos ≥ 0.60 | **363 people appear more than once**, 1,052 rows involved, largest group 20 |
+| ditto at cos ≥ 0.70 (very strict) | 480 redundant rows |
+
+Complete linkage, not single linkage: an early single-linkage pass reported a 45-face cluster that
+turned out to be one heavily-photographed blonde woman with a dozen unrelated lookalikes *chained*
+onto her through intermediate similarities. Requiring every member to be mutually above the cut
+removes that failure mode, and the surviving two-face clusters are unambiguous on sight — the same
+celebrity twice, the same selfie twice.
+
+**This defeats `split_by_face_id`, and it does not matter.** The hard rule in CLAUDE.md splits
+train/val by face id to stop a face appearing on both sides. One person owning several face ids
+walks straight through it: at `val_fraction 0.2` — the shipping checkpoint's split — **32.7% of val
+faces have their own identity present in train**, touching **54.2% of val pairs**. That is the exact
+leak the rule exists to prevent.
+
+Measured on `train-v14-panel-ship`, the inflation is **zero**:
+
+| val pairs | n | accuracy |
+|---|---|---|
+| identity also in train | 1,035 | 77.9% |
+| genuinely unseen identity | 862 | **78.0%** |
+
+So no reported accuracy needs revising. That is itself evidence for §5.8's diagnosis: a model that
+had memorised individuals would score higher on the half it had seen, and this one does not — it is
+learning population-level appearance and failing to *extract* fine ordering, exactly as five training
+arms suggested. Worth keeping as the standing answer to "is the comparator just memorising faces".
+
+> **What it does cost.** ~10% of a 200-face reference set (17 female, 21 male) is a second photo of
+> someone already in it, which quietly doubles those people's weight in the MLE. Small, and worth
+> fixing when the reference set is next rebuilt, but not a correctness bug.
+
+**The genuinely valuable part: we have owned a test–retest set all along.** §5.6 and the training
+charter both record that photo-to-photo stability was unmeasurable because "the cohort is one front
+photo per person", and the multi-photo band-narrowing feature was shelved on that basis. That premise
+was false. 363 identities carry two or more *different* photos, each independently ranked by BT, which
+is precisely a repeat measurement.
+
+Scoring each identity's photos through `bt-refit-v5-panel`:
+
+| same person, different photo | /10 |
+|---|---|
+| median spread | **0.65** |
+| p90 spread | **1.54** |
+| share differing by more than 1.0 | 28% |
+| max | 4.23 |
+
+**The p90 photo-to-photo spread (1.54) is larger than the model's p90 placement error (0.93).** Which
+photo a user uploads moves their score more than which checkpoint we ship does. Three consequences:
+
+1. It is independent support for shipping a **band** rather than a point score — and it is the first
+   estimate of the *photo* band, which until now was the one band with no measurement behind it.
+2. It re-opens **multi-photo inverse-variance narrowing** as a buildable feature rather than a
+   proposal waiting on data.
+3. It reframes the remaining error budget. Chasing another 0.1 /10 out of the comparator is worth
+   less than asking the user for a second photo.
+
+Caveat on the figure: the spread mixes genuine photo-to-photo variation with BT's own estimation
+noise on each face, so 0.65 is an **upper bound** on the photo component. Separating them needs each
+face's BT standard error, which `bt_uncertainty.py` already produces — not yet done.
+
+Artifacts: `scripts/audit_validation_identities.py` (embedding, thresholding, cluster reports),
+`artifacts/.cache/cohort-arcface.npz` (3,000 cohort embeddings, cached).
 
 ---
 
@@ -2271,6 +2657,38 @@ ethics section of any write-up.
 ### 6.3 Evaluation protocol
 
 <!-- Held-out sample size, rater instructions, blind procedure. -->
+
+**Protocol A — off-cohort placement validation (built 2026-08-04, unrun).**
+`scripts/validate_placement.py`; full rationale in
+[`production-scoring-pipeline.md` §7](./production-scoring-pipeline.md). This is the held-out *face*
+test §6.3 has been asking for since it was written, and it is stronger than the version originally
+sketched here because the faces come from a **different source entirely** — not a held-out slice of
+the same 3,000, so no shared camera, lighting, demographic draw or VLM label.
+
+| | |
+|---|---|
+| Sample | 50–100 photos from outside faceiq-labs, one face each, same gender as the reference set used |
+| Task | ~300 pairwise judgements (**not** absolute /10 labels — see below), ~20 min |
+| Ceiling | ~10% of pairs re-asked with sides flipped; the labeller's self-agreement is the denominator |
+| Optional | hand /10 **ranges** per face, for the calibration test only |
+| Reported | ordering accuracy as a share of ceiling; accuracy within vs beyond the 1.33 resolvable gap; predicted vs observed agreement; Kendall τ vs a BT fit on the labeller's own judgements; scale **shift** vs residual **spread**; band coverage |
+
+**Why pairwise and not absolute /10.** Absolute labels reintroduce the subjectivity the pairwise
+programme exists to remove: two labellers' "6 to 7" differ by an unmeasurable constant, so an
+absolute-label test cannot separate "the model is wrong" from "we disagree about what a 7 means".
+Pairwise judgements need no shared scale. Ranges are still collected, but they answer a different
+question — whether the *anchor ladder* is offset, which is free to fix — and the report deliberately
+splits median error into a **shift** (re-anchor) and a **spread** (retrain), because a single combined
+number is how a month gets spent on the model to fix arithmetic.
+
+**Why the repeat pairs are not optional.** Without them the natural denominator is 100%, which is the
+same mistake that made the panel look like it was failing until the leave-one-out ceiling came in at
+74.9% (§5.8). The harness refuses to interpret a share-of-ceiling above 105%, reporting instead that
+the labeller's own noise is what is being measured.
+
+**Stated limitation.** The rater is one person, so this measures agreement with one consistent taste,
+not with the population — that is what the panel measures. A pass means the system generalises to
+unseen faces from an unseen source; it does not upgrade to a population claim.
 
 ### 6.4 Results
 
@@ -2359,6 +2777,9 @@ specifies. Both are needed — the pair test says "does it predict this choice",
 | 2026-08-04 | **Stop buying human labels above a 20-point percentile gap — permanently** (§5.8) | Headroom on an unbiased uniform draw is −0.9 [−2.1, +0.4] at 20–45 and **−1.3 [−2.2, −0.5]** at 45–100, the second interval entirely below zero: a purchased vote there is *worse* than the free label. Confirmed independently by `panel_run_delta` (run 4 = +0.09 pts, $11,140/pt) and by v5's held-out gains (+0.0 at 45–100). **$14,367 cancelled** | Keep the bands "unresolved" and buy a probe tranche (rejected — three methods agree); buy the whole export (rejected long since) |
 | 2026-08-04 | **`bt-refit-v5-panel` is the ranking of record** | Pools all three panel runs (10,280 pairs, 95,245 votes, 963 raters); all §5.1 gates pass, ρ_stab 0.9924/0.9914; ρ 0.9667 vs v2-qc with 599 faces moving > 0.5 /10 | Stay on v4 (rejected — leaves 29k votes unused) |
 | 2026-08-04 | **The next dollar goes to training, not labels** (§5.8) | On a population sample the comparator is **1.8–3.1 pts behind** the VLM-only ranking (paired, all intervals below zero), losing the 10–45 band by 3–7 pts. The ordering is already in the labels we own and the network is not extracting it, so more ground truth cannot fix it. **Confirmed the same day by `train-v16`**, which added run 4's wide-band votes (train-split coverage 14.7% → 19.4%) and left the 10–20 band unmoved | Buy the $7,463 buy-zone tranche now (deferred — it would improve a ranking the product does not ship) |
+| 2026-08-04 | **Stop asking the comparator to reproduce the global ordering; place new faces against the ranking instead** (§5.8) | Five arms — more labels, soft vs hard targets, fixed checkpoint selection, a variance head, and 4× resolution — all tie at 1.8–2.1 pts behind BT, and the 10–20 band never moves off ~55% against BT's 63.2%. `train-v10`, which saw no panel labels at all, loses the same bands. BT solves a global system over 47,914 comparisons; the comparator sees only local pairs. It beats BT *under* a 10-pt gap, so use it for what it is good at and take the global ordering from BT via reference-set placement (~200 refs, measured) | Keep tuning the comparator (rejected — five arms, no movement); ship the raw scalar (rejected — unanchored by construction) |
+| 2026-08-04 | **Resolution is ruled out** (§5.8) | Matched resnet50 pair varying only `image_size`: 64.11% at 112 px vs 64.27% at 224 px, a tie (−0.15, CI [−2.07, +1.78]), and 224 px is *worse* on the 10–20 band. Source photos are 1024×1024 so the hypothesis was live, and it is now closed. Note `arcface_r50` physically cannot take 224 px | Do the head surgery on ArcFace to test 224 there (rejected — the clean resnet50 pair already answers it) |
+| 2026-08-04 | **The variance head does not give a per-photo σ** (§5.8) | σ varies (CV 0.22) but correlates +0.52 with the score and its residual is flat across every photo-quality flag (−0.027 to +0.059 against a σ sd of 0.169). It learned that the thin top of the ranking is ill-determined, not that a photo is bad. Multi-photo band narrowing therefore has no σ to work with yet | Ship σ as a photo-quality band (rejected — measured, it is not measuring that); train with quality augmentation (deferred — plausible, untested) |
 | 2026-08-04 | **Stop selecting checkpoints on `val_accuracy`** (§5.8) | It is scored against the export's Gemini labels, which §5.3.1 established cannot see a panel-driven improvement; v16's top four epochs sit within 0.6 points of each other on it, so `best.pt` is near-arbitrary with respect to the metric that matters. All arms share the flaw, so past comparisons stay fair | Keep the current selection (rejected — free to fix, and it may be costing every arm real accuracy) |
 | 2026-08-04 | **Revert to the soft (vote-share) panel target** (§5.8) | Reverses 2026-08-01, which was decided on hard pairs only. On population pairs v12-soft − v10-control = **+1.20 [+0.04, +2.35]** (separable) while v13-hard − control = −0.46 [−1.50, +0.58] (a tie). Rounding a decisive vote share to 0/1 destroys the margin information | Keep `panel_hard: true` (rejected — measured worse where it matters) |
 | 2026-08-04 | **Every accuracy figure must state its pair distribution *and* which of the two accuracy metrics it is** (§5.8) | Pair selection alone moves the same ranking ~29 points (52.9% on near-ties, 81.7% on a uniform draw), and majority-level versus vote-level moves it ~10 more (81.7% vs 70.6% on the same pairs). An earlier draft mixed the two and invented a 14-point gap between the ranking and the comparator | Keep quoting the near-tie number alone (rejected — understates by ~29 pts); quote population alone (rejected — hides research progress); pick one metric and drop the other (rejected — they answer different questions, and the product needs both) |

@@ -1,35 +1,35 @@
-# Does the comparator lose the middle of the scale because it cannot see enough pixels?
+# ❌ DOES NOT RUN. Kept as the record of why, because the reason is a real constraint.
 #
-# The hypothesis. Log §5.8: the network beats the BT ranking under a 10-point percentile gap and
-# loses the 10-45 band by 3-7 points. Two faces 10-45 points apart differ by real but moderate
-# structural margins — jaw width, eye spacing, midface proportion — and every run in the
-# programme has fed the network **112 x 112** pixels. At that size a whole eye is ~12 px across.
-# The near-tie pairs it wins on may be won on coarse cues (skin, symmetry, overall harmony) that
-# survive downsampling, while the mid-gap ordering needs detail that does not.
+#   RuntimeError: mat1 and mat2 shapes cannot be multiplied (32x100352 and 25088x512)
 #
-# The test. Identical to train-v17 in every other respect: same labels, same split, same lr,
-# same schedule, same selection metric. Only `image_size` changes, 112 -> 224.
+# ArcFace w600k_r50 arrives as an ONNX graph converted whole by onnx2torch, and its final layer is
+# a fixed `Linear(25088, 512)` — that is 512 channels x 7 x 7, the feature map a 112px input
+# produces. At 224px the map is 14 x 14, so the flatten emits 100,352 features and the head
+# rejects them. **ArcFace is hard-wired to 112px** and no config change reaches that.
 #
-# ⚠️ Read a NULL result carefully, because this arm is confounded and it is better to say so now
-# than to over-read it later. The ArcFace w600k_r50 weights were pretrained on 112 x 112 aligned
-# crops; feeding 224 doubles every feature map and puts the pretrained filters at the wrong
-# spatial scale. So "224 did not help" has two readings — resolution does not matter, OR this
-# backbone cannot use resolution — and this arm alone cannot separate them. If it fails, the
-# follow-up is a backbone that natively wants 224 (the v2 resnet50 run scored 75.4% against VLM
-# labels at 224, so the plumbing exists), NOT a conclusion that detail is irrelevant.
+# The two ways out, and why neither is used here:
 #
-# Cost: 4x the pixels means roughly 4x the step time, so budget ~2 hours rather than ~35 minutes.
-# batch_size stays 32 so the optimisation is comparable; that is ~4x the activation memory, which
-# still fits an A10G's 23 GB.
+#   * Insert AdaptiveAvgPool2d((7,7)) before the flatten. Fits the head, but averages each 2x2
+#     block — which discards exactly the extra detail the experiment exists to test. Pointless.
+#   * Replace the final Linear with a fresh Linear(100352, 512). Legitimate (the conv trunk is
+#     the bulk of the pretrained value) but it discards a pretrained layer, so a null result
+#     would be unreadable: pretrained-head-loss and resolution would be confounded.
 #
-# Run: FACEIQ_ARMS="train-v18-arcface-224" scripts/sync_panel_to_gpu.sh <ip>
+# The test moved to a matched pair on a backbone that natively takes any input size:
+# `train-v20-resnet50-112` and `train-v21-resnet50-224`, identical except image_size. resnet50 is
+# a weaker backbone than ArcFace in absolute terms (75.4% vs 78.4% against VLM labels in the
+# v1-v10 sweep), so those arms cannot be compared to the ArcFace arms — but they CAN be compared
+# to each other, which is the only comparison the resolution question needs.
+#
+# Worth knowing before reading that result: the source photos are **1024 x 1024**, so training at
+# 112px uses about 1.2% of the available pixels. There is real detail being discarded.
 
 export_dir: data/exports/cmr1mr0m7000196d57zi3vcgn
 run_name: train-v18-arcface-224
 
 backbone: arcface_r50
 freeze_backbone: false
-image_size: 224
+image_size: 224          # <- incompatible with arcface_r50; see the note above
 batch_size: 32
 epochs: 10
 lr: 0.00001

@@ -146,9 +146,12 @@ from "unresolved" to a hard **no**:
 **Headroom** is the column that decides spend: the crowd ceiling (one rater vs the majority of the others)
 minus what the free VLM label already scores. Buy where the whole interval clears zero.
 
-- **Buy zone, 0–20 gap:** **$7,463** finishes all four bands (12,862 unlabelled pairs). All four intervals
-  are entirely above zero, so this is validated spend — but see §2b, it is currently *deferred* behind
-  fixing the comparator.
+- **Buy zone, 0–20 gap: ⛔ DO NOT BUY, as of 2026-08-04.** $7,463 for 12,862 unlabelled pairs, and all
+  four headroom intervals are still entirely above zero — the *labels* are genuinely better than the free
+  ones. But §2b measured both routes by which that quality could reach a user's score and both are shut:
+  0.2 pts (downward) through the reference set, 0.00 pts [−0.96, +0.96] through the comparator's training
+  set. **This table measures label quality, which turns out to be necessary and not sufficient.** Label
+  quality has stopped being the binding constraint.
 - **Above a 20-point gap: never. This is closed, not deferred.** The 45–100 interval is entirely *below*
   zero, meaning a purchased vote is worse than the free label: one rater agrees with the crowd 81.9% of the
   time where Gemini agrees 83.3%. 20–45 is centred negative with a best case of +0.4 pt at $8,269. On run
@@ -228,6 +231,50 @@ it is still failing.
 | human votes → better BT ranking | ✅ measured, +3.18 per study *on hard pairs*; +0.09 on uniform pairs |
 | better BT ranking → better neural comparator | ✅ **measured 2026-08-01, +2.00 pts vs its own labels** |
 | comparator reaches the ranking's own accuracy | ❌ **failing as of 2026-08-04 — this is now the gate** |
+| better BT ranking → better **production score** (via reference θ) | ❌ **measured 2026-08-04, flat. See below** |
+
+> **⛔ New and decisive: the reference-set route is closed.** `scripts/ranking_value_to_placement.py`
+> holds the comparator fixed at `train-v14-panel-ship` and swaps only the ranking that supplies
+> reference θ, walking the refit ladder from zero human votes to all 65,894, then scores each against
+> the same held-out human votes:
+>
+> | ranking supplying reference θ | panel runs in it | vs majority | vs votes |
+> |---|---|--:|--:|
+> | `bt-refit-v2-qc` | none (VLM only) | 82.1% | 70.9% |
+> | `bt-refit-v3-panel` | run 1 | 82.1% | 70.9% |
+> | `bt-refit-v4-panel` | runs 1+3 | 82.1% | 70.9% |
+> | `bt-refit-v5-panel` | runs 1+3+4 | 81.9% | 70.8% |
+>
+> **65,894 human votes moved the number a user sees by 0.2 points, in the wrong direction.** The bias
+> ran toward finding an effect — run 4's votes are *inside* v5, so evaluating v5 on run 4 pairs is
+> partly in-sample and should have flattered it.
+>
+> The mechanism is the same `p(1−p)` weighting that makes curation pointless: reference θs enter the
+> fit as fixed constants with weight at most 0.25 each, spread over 200 references, so improvements to
+> them average out. Placement is dominated by the **comparator's** ordering.
+>
+> **So labels only reach the user through the comparator's training set** — and that route was tested
+> and came back empty too.
+
+> **⛔⛔ The gating experiment has run. `train-v22-ship-0.2` is a dead tie with `train-v14-panel-ship`:
+> 81.7% vs 81.7% against human votes, paired bootstrap over 2,390 pairs, +0.00 pts [−0.96, +0.96].**
+> v22 is v17's label recipe — soft panel targets, run 4 folded in, human-grounded checkpoint
+> selection — at v14's data volume. It changed nothing, which means essentially all of v14's advantage
+> over the 0.5-split arms was **training-pair count, not label quality**.
+>
+> **Both routes are now measured shut.** Panel labels do not reach a user's score through the
+> reference set (0.2 pts, downward) and do not reach it through the comparator's training set
+> (0.00 pts). **Do not buy the $7,463 buy zone.** Its headroom table is still correct about label
+> quality on those pairs; label quality has simply stopped being the binding constraint.
+>
+> Scope, stated so this is not over-read: v14 already contains panel runs 1 and 3, so this tests the
+> *increment* — run 4, soft targets, better selection — not whether panel labels help at all. §5.3.1
+> measured +2.00 pts for wiring them in the first time. The finding is that we are past the point
+> where more of the same buys anything, not that the programme was wrong to buy them.
+>
+> **What would reopen the question:** a materially different *kind* of label (test–retest pairs, or
+> ratings from a demographically different panel), or a model change that raises the ceiling on what
+> labels can be extracted. Not more pairs from the same pool.
 
 > **⛔ The gate has closed again, for a different reason. Do not buy the buy zone yet.** Log §5.8 measured
 > both on a *population* sample and the comparator is **1.8–3.1 points behind the VLM-only ranking**
@@ -647,8 +694,12 @@ computed on the population. They were computed on Labs' users, who self-selected
 face-rating app. If that pool sits above the population, every /10 we print is shifted down —
 our "5.0" could be a population 6 or 7.
 
-Nothing in our data can settle this; it needs an outside reference. The mechanism already
-exists: the dashboard's **Anchor panel** (§5.4 Path B), where you assign product /10 scores to
-known faces and place cohort faces on that ladder instead of on cohort percentiles. Worth
-resolving before any absolute score ships. It is independent of, and does not undermine, any
-of the ranking results above.
+Nothing in our data can settle this; it needs an outside reference. The dashboard's Anchor panel used
+to be the proposed mechanism — hand-assigned product /10 scores, §5.4 Path A — and it was **removed
+2026-08-04**, because hand-assigning what a 7 means substitutes one person's taste for 95,245 measured
+votes. Two things replace it. The **anchor curve** (`production-scoring-pipeline.md` §4) is where a
+shift belongs: it is one monotone function, so a whole-scale correction is a single edit rather than
+200 individual judgments. And the **off-cohort validation** (§7 there) is what would *detect* the
+shift, since it reports systematic offset separately from per-face spread precisely so a re-anchor
+(free) is never confused with a retrain (expensive). Worth resolving before any absolute score ships;
+independent of, and it does not undermine, any of the ranking results above.

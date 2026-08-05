@@ -1,0 +1,51 @@
+# Resolution arm 224px — half of a matched pair. The ONLY difference between
+# train-v20-resnet50-112 and train-v21-resnet50-224 is `image_size`.
+#
+# The question: log §5.8 shows the comparator losing the 10-45 percentile band to the ranking by
+# 3-7 points, and three arms (more labels, better targets, fixed checkpoint selection) have failed
+# to close it. The last untested perceptual hypothesis is that 112px is simply not enough pixels to
+# resolve the moderate structural differences that separate faces 10-45 points apart. The source
+# photos are **1024 x 1024**, so at 112px we are training on about 1.2% of the available pixels.
+#
+# Why resnet50 rather than ArcFace, which is our best backbone: ArcFace w600k_r50 is hard-wired to
+# 112px input — its final Linear(25088, 512) is sized for a 7x7 feature map and rejects 224px
+# outright (see configs/train-v18-arcface-224.yaml for the traceback and the two rejected
+# workarounds). resnet50 uses adaptive pooling and takes any size, so it can answer the resolution
+# question cleanly by varying nothing else.
+#
+# How to read the pair. resnet50 is weaker than ArcFace in absolute terms (75.4% vs 78.4% against
+# VLM labels in the v1-v10 sweep), so **do not compare these arms to the ArcFace arms** — compare
+# them only to each other, and only on the 10-45 band. If 224 clearly beats 112 there, resolution
+# matters and it is worth doing the head surgery on ArcFace. If it does not, resolution is ruled
+# out for about three GPU-hours and we stop wondering.
+#
+# Run: FACEIQ_ARMS="train-v20-resnet50-112 train-v21-resnet50-224" scripts/sync_panel_to_gpu.sh <ip>
+
+export_dir: data/exports/cmr1mr0m7000196d57zi3vcgn
+run_name: train-v21-resnet50-224
+
+backbone: resnet50
+freeze_backbone: false
+image_size: 224
+batch_size: 32
+epochs: 10
+lr: 0.00001
+weight_decay: 0.0001
+
+val_fraction: 0.5
+split_seed: 42
+num_workers: 4
+skip_ties: true
+augment: true
+
+panel_labels:
+  - [labels/panel-pilot/results, labels/panel-pilot/sample-meta.json]
+  - [labels/panel-run-3/results, labels/panel-run-3/sample-meta.json]
+  - [labels/panel-run-4-random/results, labels/panel-run-4-random/sample-meta.json]
+panel_rejects:
+  - artifacts/panel-run-v1/reject-pids.txt
+  - artifacts/panel-run-v3/reject-pids.txt
+  - artifacts/panel-run-v4/reject-pids.txt
+panel_min_votes: 4
+panel_prior: 1.0
+panel_hard: false

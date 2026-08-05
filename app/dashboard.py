@@ -20,7 +20,7 @@ from scipy.stats import spearmanr
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from faceiq_pref.calibrate import ANCHORS, score_out_of_10  # noqa: E402
+from faceiq_pref.calibrate import ANCHORS, make_scorer, score_out_of_10  # noqa: E402
 from faceiq_pref.composite import (  # noqa: E402
     METHODS,
     blend,
@@ -92,11 +92,11 @@ def gender_choices(series: pd.Series) -> list[str]:
 
 
 (tab_overview, tab_health, tab_rankings, tab_diag, tab_panel, tab_bands, tab_spend,
- tab_training, tab_inspect, tab_gallery, tab_composite, tab_infer, tab_anchor,
+ tab_training, tab_inspect, tab_gallery, tab_composite, tab_infer,
  tab_labeler) = st.tabs(
     ["Runs overview", "Export health", "BT rankings", "Refit diagnostics", "Human panel",
      "Score bands", "Label spend", "Training runs", "Model inspection", "Model gallery",
-     "Composite", "Inference", "Anchor panel", "Pilot-500 labeler"]
+     "Composite", "Inference", "Pilot-500 labeler"]
 )
 
 
@@ -972,13 +972,28 @@ with tab_bands:
         c2.metric("Band to display", f"{lo:.1f} – {hi:.1f}",
                   help="Half-width is T·logit(agreement)/2, so two people whose bands do not "
                        "overlap differ by the full resolvable gap.")
+        from faceiq_pref.placement import agreement_vs_tier_below, tier_of
+
+        _tier, _tlo, _thi = tier_of(score)
+        _below = agreement_vs_tier_below(score)
+        _tier_line = (
+            f"About **{_below[1]:.0%} of people** would place you above a typical **Tier "
+            f"{_below[0]}** face."
+            if _below else "This is the lowest tier, so there is no tier below to compare to."
+        )
         c2.markdown(
-            f"> **You score {score:.1f}.**  \n"
-            f"> About **{conf:.0%} of people** would place you above someone scoring "
-            f"**{max(1.0, score - gap):.1f}**, and below someone scoring "
-            f"**{min(10.0, score + gap):.1f}**.  \n"
-            f"> Someone whose band overlaps **{lo:.1f}–{hi:.1f}** is closer to you than the "
-            f"scale can resolve."
+            f"> **You score {score:.1f} — Tier {_tier} of 7** ({_tlo:.1f}–{_thi:.1f}).  \n"
+            f"> {_tier_line}  \n"
+            f"> Anyone whose band overlaps **{lo:.1f}–{hi:.1f}** is closer to you than the scale "
+            f"can resolve — we would not claim an ordering between you."
+        )
+        c2.caption(
+            "**Why this is phrased against a tier and not a number.** The mechanical version of "
+            f"the sentence is *\"{conf:.0%} of people would place you above someone scoring "
+            f"{max(1.0, score - gap):.1f}\"* — arithmetically correct and bad copy, because it "
+            "reads as though some raters think this face **is** that number. They do not: that "
+            "number is a *different, lower-scoring face*, one resolvable gap down. Naming the tier "
+            "below carries the same information and cannot be misread that way."
         )
         c2.caption(
             "**Why half the gap:** two bands stop overlapping exactly when the two scores differ "
@@ -2201,10 +2216,29 @@ with tab_infer:
         member_z_cohorts: list[pd.Series] = []
 
         if infer_mode == "Single checkpoint":
+            # Default to the checkpoint measured best at PLACEMENT, not the newest one. The v12-v21
+            # arms all ran at val_fraction 0.5 to hold out panel pairs, so they trained on 13k pairs
+            # against v14's 33k; scored on the same held-out faces v14 places at 0.34/0.28 median
+            # /10 error vs 0.44-0.47. See scripts/placement_by_checkpoint.py and pipeline doc §3d.
+            shippable = ("train-v14-panel-ship", "train-v22-ship-0.2")
+            default_ckpt = next(
+                (i for i, p in enumerate(ckpts) if p.parent.name == shippable[0]),
+                len(ckpts) - 1,
+            )
             ckpt_path = st.selectbox(
                 "Checkpoint", ckpts, format_func=lambda p: p.parent.name,
-                index=len(ckpts) - 1, key="infer_ckpt",
+                index=default_ckpt, key="infer_ckpt",
             )
+            if ckpt_path.parent.name not in shippable:
+                st.caption(
+                    f"⚠️ Use **{shippable[0]}** or **{shippable[1]}** — they are a dead tie with "
+                    f"each other (81.7% vs human votes, +0.00 [−0.96, +0.96]) and both far ahead "
+                    f"of everything else on placement: 0.34 median /10 error and 67–69% tier-exact "
+                    f"versus 0.44–0.47 and 55–57%. The other arms ran at `val_fraction 0.5` to hold "
+                    f"out panel pairs, so they trained on 13k pairs instead of 33k — controlled "
+                    f"label-recipe comparisons, never production candidates. "
+                    f"`scripts/placement_by_checkpoint.py --common-val`."
+                )
             member_ckpts: list[Path] = [ckpt_path]
             default_ctx = next(
                 (i for i, p in enumerate(score_runs) if p.name == ckpt_path.parent.name),
@@ -2264,6 +2298,202 @@ with tab_infer:
             value=True,
         )
 
+        # ---- reference set ----------------------------------------------------------
+        # Built before the uploader so it can be inspected on its own. The comparator was trained
+        # pairwise, so the honest read is "which cohort faces of known theta does this face beat",
+        # not "what number did the head emit". See src/faceiq_pref/placement.py and log §5.8.
+        ref_ids: list[str] = []
+        if ctx_dir is not None:
+            from faceiq_pref.placement import (
+                ANCHORS_TOP10,
+                DEFAULT_AGREEMENT,
+                agreement_vs_tier_below,
+                place,
+                stratified_reference_ids,
+                tier_edges,
+                tier_of,
+            )
+
+            to_ten_top10 = make_scorer(ANCHORS_TOP10)
+            sc = pd.read_csv(ctx_dir / "model_scores.csv")
+            cohort = sc[sc["gender"] == gender_ctx].sort_values("modelScore").reset_index(drop=True)
+            refits = find_bt_refits()
+            exports = find_exports()
+            img_paths = load_face_image_paths(str(exports[0])) if exports else {}
+
+            rank_names = [p.name for p in refits]
+            pl_cols = st.columns([2, 1, 1])
+            rank_pick = pl_cols[0].selectbox(
+                "Reference ranking (supplies each reference face's θ)", rank_names,
+                index=rank_names.index("bt-refit-v5-panel")
+                if "bt-refit-v5-panel" in rank_names else len(rank_names) - 1,
+                key="infer_rank",
+            )
+            n_refs = pl_cols[1].selectbox(
+                "Reference faces", [50, 200, "all"], index=1, key="infer_nrefs",
+                help="200 is the measured operating point — past it only the standard error "
+                     "shrinks, and it is already ~5x below the disagreement band.",
+            )
+            agreement = pl_cols[2].select_slider(
+                "Band = this many people agree", options=[0.55, 0.60, DEFAULT_AGREEMENT, 0.75],
+                value=DEFAULT_AGREEMENT, format_func=lambda v: f"{v:.0%}", key="infer_agree",
+            )
+
+            # Same file the placement uses, deliberately. Reading the alphabetically-first refit
+            # here (bt-refit-v1) made the k-NN cross-check differ from the placed score by a third,
+            # invisible reason on top of the estimator and the ladder.
+            rank_df = pd.read_csv(ROOT / "artifacts" / rank_pick / "ratings.csv")
+            ratings = rank_df if "scoreOutOf10" in rank_df.columns else None
+            rank_g = rank_df[rank_df["gender"] == gender_ctx]
+            theta_of = dict(zip(rank_g["faceId"], rank_g["theta"]))
+            pct_of = dict(zip(rank_g["faceId"], rank_g["percentile"]))
+            score_of = dict(zip(cohort["faceId"], cohort["modelScore"]))
+            population_thetas = list(theta_of.values())
+
+            usable = {f: p for f, p in pct_of.items() if f in score_of}
+            ref_ids = (list(usable) if n_refs == "all"
+                       else stratified_reference_ids(usable, n=int(n_refs)))
+            ref_thetas = [theta_of[f] for f in ref_ids]
+            ref_scores = [score_of[f] for f in ref_ids]
+            st.caption(
+                f"{len(ref_ids):,} reference faces from **{rank_pick}** ({gender_ctx}), θ known; "
+                f"percentile is read off all {len(population_thetas):,} cohort faces, because a "
+                f"tier-stratified reference set is deliberately *not* population-representative. "
+                f"Tier edges: " + ", ".join(f"{e:.1f}" for e in tier_edges())
+            )
+
+            # ---- post-hoc second opinion: blend the Labs deterministic score in ----------
+            # Applied AFTER the MLE, on the /10 scale, so it never touches the reference-set fit.
+            # Off by default and it should stay off: scripts/labs_composite_eval.py shows the
+            # blend improving agreement with BT while flat-to-worse against real human votes.
+            labs_w = 1.0
+            labs_ladder: list[float] = []
+            labs_of: dict[str, float] = {}
+            comp_json = ctx_dir / "labs-composite.json"
+            with st.expander("Second opinion: blend in the Labs deterministic score"):
+                st.markdown(
+                    "Post-hoc by construction — the reference-set MLE runs first and untouched, "
+                    "then `w · placed + (1−w) · labs`, with the Labs score rank-normalised onto "
+                    "our /10 through the same anchor curve (the two scales are not otherwise "
+                    "comparable). Geometric weighting was measured too and lands within 0.003 of "
+                    "arithmetic, because both scores sit in a narrow range."
+                )
+                if comp_json.exists():
+                    cj = json.loads(comp_json.read_text())
+                    st.error(
+                        f"**Measured verdict: do not blend.** The two sources make almost "
+                        f"perfectly uncorrelated errors (r = {cj['errorCorrelation']:+.3f}), which "
+                        f"is normally the condition for a blend to help — and against **BT /10** "
+                        f"it does, clearly and significantly. Against **real human votes** it is "
+                        f"flat to slightly worse at every weight. BT is the proxy; the panel is "
+                        f"the target. A change that moves the proxy and not the target is fitting "
+                        f"the proxy's error, so this stays off."
+                    )
+                    st.dataframe(pd.DataFrame([
+                        {"w on comparator": f"{r['w']:.0%}",
+                         "BT median err": round(b["median"], 3),
+                         "BT tier exact": f"{b['tierExact']:.1%}",
+                         "vs panel majority": f"{r['vsMajority']:.1%}",
+                         "vs panel votes": f"{r['vsVotes']:.1%}"}
+                        for b, r in zip(cj["vsBT"], cj["vsPanel"])
+                    ]), hide_index=True, use_container_width=True)
+                else:
+                    st.caption(
+                        f"No measurement for this run yet — "
+                        f"`python scripts/labs_composite_eval.py --run {ctx_dir.name}`"
+                    )
+                labs_w = st.slider(
+                    "Weight on the comparator (1.00 = placement only)", 0.5, 1.0, 1.0, 0.05,
+                    key="infer_labs_w",
+                    help="Left of 1.00 shows the composite next to the placement-only read for "
+                         "every uploaded face. Kept adjustable because the EBM will slot into "
+                         "exactly this position with a better second opinion.",
+                )
+                if labs_w < 1.0:
+                    exports_l = find_exports()
+                    if exports_l:
+                        fj = Path(exports_l[0]) / "faces.jsonl"
+                        rowsl = [json.loads(ln) for ln in fj.read_text().splitlines()]
+                        labs_of = {r["faceId"]: r["labsOverallScore"] for r in rowsl
+                                   if r.get("labsOverallScore") is not None}
+                        labs_ladder = sorted(labs_of[f] for f in usable if f in labs_of)
+                        st.caption(
+                            f"Labs ladder built from {len(labs_ladder):,} {gender_ctx} cohort "
+                            f"faces. Uploads have no Labs score, so enter one per photo below to "
+                            f"see the composite."
+                        )
+
+            with st.expander(f"Browse the whole {gender_ctx} reference set ({len(ref_ids)} faces)"):
+                st.caption(
+                    "The reference set is per-gender: a face is only ever compared against "
+                    "references of its own gender, so there are two independent sets and this "
+                    "shows one at a time. Faces are laid out in **θ order**, so reading left to "
+                    "right down the page should look like increasing attractiveness — where it "
+                    "does not, that is either real ranking noise or a pair the scale genuinely "
+                    "cannot resolve, and the tier headings tell you which."
+                )
+                to_ten_ref = to_ten_top10
+                ref_tbl = pd.DataFrame({
+                    "faceId": ref_ids,
+                    "theta": [theta_of[f] for f in ref_ids],
+                    "percentile": [pct_of[f] for f in ref_ids],
+                    "modelScore": [score_of[f] for f in ref_ids],
+                })
+                ref_tbl["scoreOutOf10"] = ref_tbl["percentile"].map(to_ten_ref)
+                ref_tbl["tier"] = ref_tbl["scoreOutOf10"].map(lambda v: tier_of(v)[0])
+                ref_tbl = ref_tbl.sort_values("theta").reset_index(drop=True)
+
+                # How many references per tier, and how thin the cohort itself is up there. This is
+                # the table that answers "do we have references at the top" -- tier stratification
+                # fills to availability, so the top tiers are capped by the cohort, not by quota.
+                pop_tier = pd.Series(
+                    [tier_of(to_ten_ref(p))[0] for p in pct_of.values()]
+                ).value_counts()
+                counts = pd.DataFrame({
+                    "tier": range(1, 8),
+                    "/10 range": [f"{tier_edges()[i]:.1f}–{tier_edges()[i + 1]:.1f}"
+                                  for i in range(7)],
+                    "references": [int((ref_tbl["tier"] == t).sum()) for t in range(1, 8)],
+                    f"{gender_ctx} cohort": [int(pop_tier.get(t, 0)) for t in range(1, 8)],
+                })
+                counts["share of references"] = counts["references"] / max(1, len(ref_tbl))
+                st.dataframe(
+                    counts.style.format({"share of references": "{:.1%}"}),
+                    use_container_width=True, hide_index=True,
+                )
+                st.caption(
+                    "If a top tier shows fewer references than its quota, the cohort has run out "
+                    "of faces there — not a sampling bug. That thinness is exactly why a user in "
+                    "the top 1% can beat every reference and come back unbounded."
+                )
+
+                if not img_paths:
+                    st.info("No export found, so no face images to show — table only.")
+                else:
+                    show_tier = st.multiselect(
+                        "Tiers to show", list(range(1, 8)),
+                        default=list(range(1, 8)), key="ref_tiers",
+                    )
+                    per_row = 8
+                    for t in sorted(show_tier):
+                        rows = ref_tbl[ref_tbl["tier"] == t]
+                        if rows.empty:
+                            continue
+                        st.markdown(
+                            f"**Tier {t}** ({tier_edges()[t - 1]:.1f}–{tier_edges()[t]:.1f}) — "
+                            f"{len(rows)} references"
+                        )
+                        for start in range(0, len(rows), per_row):
+                            chunk = rows.iloc[start:start + per_row]
+                            for col, (_, r) in zip(st.columns(per_row), chunk.iterrows()):
+                                p = img_paths.get(r["faceId"])
+                                if p and Path(p).exists():
+                                    col.image(str(p), use_container_width=True)
+                                col.caption(
+                                    f"{r['scoreOutOf10']:.1f} · p{r['percentile'] * 100:.0f} · "
+                                    f"θ{r['theta']:+.2f}"
+                                )
+
         uploads = st.file_uploader(
             "Photos", type=["jpg", "jpeg", "png", "webp"], accept_multiple_files=True,
         )
@@ -2274,15 +2504,6 @@ with tab_infer:
             use_norm = normalize and normalizer_available()
             if normalize and not use_norm:
                 st.warning("mediapipe not available (`uv pip install mediapipe`) — scoring uncropped images.")
-
-            sc = pd.read_csv(ctx_dir / "model_scores.csv")
-            cohort = sc[sc["gender"] == gender_ctx].sort_values("modelScore").reset_index(drop=True)
-
-            # join BT /10 + image paths for the ladder display
-            refits = find_bt_refits()
-            ratings = pd.read_csv(refits[0] / "ratings.csv") if refits else None
-            exports = find_exports()
-            img_paths = load_face_image_paths(str(exports[0])) if exports else {}
 
             for up in uploads:
                 img = Image.open(up).convert("RGB")
@@ -2333,9 +2554,80 @@ with tab_infer:
                         joined["dist"] = (joined["modelScore"] - s).abs()
                         nearest = joined.nsmallest(5, "dist")
                         st.metric(
-                            "Approx. /10 (5 nearest cohort faces)",
+                            "Cross-check /10 (5 nearest cohort faces)",
                             f"{nearest['scoreOutOf10'].mean():.2f}",
+                            help=f"Sanity check only, and it will not match the placed /10 below. "
+                                 f"It averages the pre-registered scoreOutOf10 of the 5 "
+                                 f"{rank_pick} faces with the closest comparator score — a "
+                                 f"different estimator (k-NN, not the reference-set MLE) on a "
+                                 f"different anchor ladder (pre-registered top≈9, not top=10). A "
+                                 f"gap of a few tenths is expected; more than ~1 point means the "
+                                 f"placement is fighting its own k-NN neighbourhood and is worth "
+                                 f"looking at.",
                         )
+
+                    # ---- the production read: band + tier from reference-set placement ----
+                    if ref_ids:
+                        pl = place(s, ref_scores, ref_thetas,
+                                   population_thetas=population_thetas, agreement=agreement)
+                        m1, m2, m3 = st.columns(3)
+                        m1.metric(f"Tier {pl.tier} of 7",
+                                  f"{pl.tier_low:.1f} – {pl.tier_high:.1f}",
+                                  help="Tier width 1.29 /10 against a measured resolution limit of "
+                                       "1.33, so differences inside a tier are below what people "
+                                       "agree on.")
+                        m2.metric("Band", f"{pl.band_low:.1f} – {pl.band_high:.1f}",
+                                  help=f"±{pl.band_half:.2f} = quadrature of the disagreement "
+                                       f"width and this face's own se(θ)={pl.se:.2f}")
+                        m3.metric("Point /10 (placed)", f"{pl.score_ten:.2f}",
+                                  help=f"θ {pl.theta:+.2f}, percentile {pl.percentile:.1%}, "
+                                       f"beat {pl.wins} of {pl.references} references. Reference-set "
+                                       f"MLE on the top-10 anchor ladder — not the same estimator "
+                                       f"or ladder as the k-NN figure above, so they differ.")
+                        below = agreement_vs_tier_below(pl.score_ten)
+                        tail = (f"About **{below[1]:.0%} of people** would place you above a "
+                                f"typical **Tier {below[0]}** face."
+                                if below else
+                                "This is the lowest tier, so there is no tier below to compare to.")
+                        st.markdown(
+                            f"> **{pl.score_ten:.1f} — Tier {pl.tier} of 7.** {tail}  \n"
+                            f"> You place above **{pl.percentile:.0%}** of the {gender_ctx} cohort."
+                        )
+                        if not pl.bounded:
+                            st.warning(
+                                "This face beat (or lost to) **every** reference, so the "
+                                "likelihood has no finite maximum — the score is capped at the "
+                                "extreme reference plus a margin and is a lower/upper bound, not "
+                                "an estimate. Expected for roughly the top 1%; use more references "
+                                "or read it as 'at least this'."
+                            )
+
+                        # ---- side by side with the Labs composite, when asked for ----
+                        if labs_w < 1.0 and labs_ladder:
+                            raw = st.number_input(
+                                "Labs overall_score for this photo",
+                                min_value=0.0, max_value=10.0, value=0.0, step=0.05,
+                                key=f"labs_{up.name}",
+                                help="From the faceiq-labs app. Leave at 0 to skip — an upload "
+                                     "has no Labs score until that pipeline runs on it.",
+                            )
+                            if raw > 0:
+                                lt = to_ten_top10(
+                                    float(np.searchsorted(labs_ladder, raw)) / len(labs_ladder)
+                                )
+                                blended = labs_w * pl.score_ten + (1 - labs_w) * lt
+                                b1, b2, b3 = st.columns(3)
+                                b1.metric("Placement only", f"{pl.score_ten:.2f}",
+                                          help=f"Tier {pl.tier}")
+                                b2.metric("Labs, on our ladder", f"{lt:.2f}",
+                                          help=f"raw {raw:.2f} → rank {np.searchsorted(labs_ladder, raw) / len(labs_ladder):.1%} "
+                                               f"of the {gender_ctx} cohort → /10")
+                                b3.metric(
+                                    f"Composite ({labs_w:.0%} / {1 - labs_w:.0%})",
+                                    f"{blended:.2f}", delta=f"{blended - pl.score_ten:+.2f}",
+                                    help=f"Tier {tier_of(blended)[0]}. Shown for comparison; the "
+                                         f"measured verdict is to ship the placement-only number.",
+                                )
                     if member_raw:
                         with st.expander("Per-member scores"):
                             for name, raw, z in member_raw:
@@ -2356,242 +2648,112 @@ with tab_infer:
                             st.caption(f"score {row['modelScore']:.2f}")
                 st.divider()
 
-
-# ---------------------------------------------------------------- anchor panel
-
-with tab_anchor:
-    from faceiq_pref.anchors import (
-        add_anchor,
-        anchor_image_path,
-        load_anchors,
-        panel_violations,
-        place_on_ladder,
-        remove_anchor,
-    )
-
-    st.caption(
-        "Reference-set inference (§5.4 Path B). Curate anchor faces with **product-assigned** "
-        "/10 scores; test photos are placed on that ladder instead of the research cohort's "
-        "percentiles. Anchors are normalized with the faceiq-labs crop and stored locally "
-        "under `data/anchors/` (git-ignored)."
-    )
-
-    # ---- 1. build the panel ------------------------------------------
-    st.subheader("Build panel")
-    if not normalizer_available():
-        st.error("mediapipe not available (`uv pip install mediapipe`) — cannot add anchors.")
-    else:
-        with st.form("add_anchor", clear_on_submit=True):
-            c1, c2, c3 = st.columns([3, 1, 1])
-            anchor_up = c1.file_uploader(
-                "Anchor photo", type=["jpg", "jpeg", "png", "webp"], key="anchor_up"
-            )
-            anchor_gender = c2.selectbox("Gender", ["female", "male"], key="anchor_gender")
-            anchor_score = c3.number_input(
-                "Product /10", min_value=1.0, max_value=10.0, value=6.0, step=0.5
-            )
-            anchor_label = st.text_input("Note (optional, e.g. who this is)", key="anchor_note")
-            if st.form_submit_button("Normalize & save anchor") and anchor_up is not None:
-                from PIL import Image
-
-                saved = add_anchor(
-                    Image.open(anchor_up).convert("RGB"),
-                    anchor_gender, anchor_score, anchor_label,
-                )
-                if saved is None:
-                    st.error("No face detected in that photo — anchor not saved.")
-                else:
-                    st.success(f"Saved anchor {saved.anchor_id} at {anchor_score:g}/10.")
-
-    anchors = load_anchors()
-    panel_gender = st.selectbox("Panel", ["female", "male"], key="panel_gender")
-    panel = sorted(
-        (a for a in anchors if a.gender == panel_gender),
-        key=lambda a: a.product_score,
-    )
-
-    if not panel:
+    # ---- validate on faces from outside the cohort --------------------------------
+    # Every accuracy number in this repo is measured against BT theta fitted on the same 3,000
+    # faces the comparator trained on. That is honest about new *comparisons* and silent about new
+    # *faces from a different source*, which is all production ever sees. This is the only surface
+    # that tests the latter, so its verdict outranks anything on the Training runs tab.
+    st.subheader("Validate on unseen faces")
+    val_sets = sorted(p.name for p in (ROOT / "data" / "validation").glob("*")
+                      if (p / "pairs.json").exists())
+    if not val_sets:
         st.info(
-            f"No {panel_gender} anchors yet. Aim for ~8–10 spanning the range "
-            "(e.g. 2, 3, 4, 5, 6, 7, 8, 9) — spacing below ~1.0 sits inside model noise."
+            "**No validation set yet.** Every accuracy number in this repo is measured against BT θ "
+            "fitted on the same 3,000 faces the comparator trained on. That is honest about new "
+            "*comparisons* and silent about new **faces from a different source**, which is all "
+            "production ever sees. This is the only surface that tests the latter.\n\n"
+            "**What you do here:** judge ~300 pairs of unseen faces by clicking the more attractive "
+            "one, without seeing any score. That produces an independent human ordering. The report "
+            "then asks whether the system reproduces it. You are not grading faces and not checking "
+            "whether scores look right."
         )
+        st.markdown(
+            "| step | where |\n|---|---|\n"
+            "| 1. Put 50–100 photos, one clear front-facing face each, from **anywhere but "
+            "faceiq-labs**, in `data/validation/<name>/photos/` | filesystem |\n"
+            "| 2. `make-pairs` builds the queue and secretly re-asks ~10% flipped | terminal |\n"
+            "| 3. Judge them here (~20 min) | this tab |\n"
+            "| 4. `score` runs the photos through the production path, never seeing your clicks "
+            "| terminal |\n"
+            "| 5. `report` prints the three verdicts | terminal |\n"
+        )
+        st.code(
+            "python scripts/validate_placement.py make-pairs --set set-1 --pairs 300 --repeat 0.1",
+            language="bash",
+        )
+        with st.expander("What the three tests tell you, and why they are reported separately"):
+            st.markdown(
+                "They fail for different reasons and have **different fixes** — one combined number "
+                "is how you spend a month on the model to fix an arithmetic problem.\n\n"
+                "**1. Ordering.** Does the placed score reproduce your pairwise choices? Scored as a "
+                "share of *your own* repeat-pair consistency, not against 100% — if you only agree "
+                "with yourself 80% of the time, 80% is the target. A failure means the comparator "
+                "does not generalise off-cohort, and the fix is model work. This would be the first "
+                "evidence that more labels are not the answer.\n\n"
+                "**2. Band.** The band claims pairs closer than ~1.33 /10 are near coin-flips and "
+                "pairs further apart are reliable. This checks both, and whether the predicted "
+                "agreement matches what you actually did. A failure means `T = 1.920` was fitted on "
+                "cohort pairs and does not transfer — the fix is refitting `T` on this data, which "
+                "is cheap. **This has never been checked anywhere.**\n\n"
+                "**3. Calibration.** Optional, and needs you to also type a *range* (\"6 to 7\") per "
+                "photo. It splits the error into a **shift** (everything placed 1.2 too low → the "
+                "anchor ladder is wrong, free to fix) and a **spread** (each face wrong in a "
+                "different direction → the model is wrong, expensive to fix). Those two demand "
+                "opposite responses, which is exactly why they must not be averaged together."
+            )
     else:
-        # score the panel once per checkpoint (cached); shows validation inline
-        ckpts_a = find_checkpoints()
-        ckpt_anchor = st.selectbox(
-            "Checkpoint", ckpts_a, format_func=lambda p: p.parent.name,
-            index=len(ckpts_a) - 1 if ckpts_a else 0, key="anchor_ckpt",
-        ) if ckpts_a else None
+        vs = st.selectbox("Validation set", val_sets, key="val_set")
+        vdir = ROOT / "data" / "validation" / vs
+        queue = json.loads((vdir / "pairs.json").read_text())["pairs"]
+        jfile = vdir / "judgments.jsonl"
+        done = [json.loads(ln) for ln in jfile.read_text().splitlines() if ln] \
+            if jfile.exists() else []
 
-        @st.cache_data(show_spinner="Scoring anchors (cached per checkpoint)...")
-        def score_anchors(ckpt: str, anchor_ids: tuple, _paths: tuple) -> dict[str, float]:
-            import torch
-            from PIL import Image
+        st.caption(
+            f"**{len(done)} of {len(queue)} judged.** You are judging *pairs*, not assigning "
+            "scores, for the same reason the panel does: an ordering needs no shared scale, so "
+            "your judgements can be compared to the model's without either of you having to agree "
+            "on what a 7 is. Some pairs repeat with the sides flipped — that is deliberate, and "
+            "your agreement with yourself on those is the ceiling the model is scored against."
+        )
+        st.progress(min(1.0, len(done) / max(1, len(queue))))
 
-            scorer, cfg, tf = load_scorer_cached(ckpt)
-            out = {}
-            for aid, p in zip(anchor_ids, _paths):
-                with Image.open(p) as img, torch.no_grad():
-                    out[aid] = scorer(tf(img.convert("RGB")).unsqueeze(0)).item()
-            return out
-
-        anchor_scores: dict[str, float] = {}
-        if ckpt_anchor is not None:
-            anchor_scores = score_anchors(
-                str(ckpt_anchor),
-                tuple(a.anchor_id for a in panel),
-                tuple(str(anchor_image_path(a)) for a in panel),
+        if len(done) >= len(queue):
+            st.success("Queue complete. Score and report:")
+            st.code(
+                f"python scripts/validate_placement.py score --set {vs} \\\n"
+                f"  --checkpoint {member_ckpts[0].relative_to(ROOT)} \\\n"
+                f"  --context artifacts/{ctx_dir.name if ctx_dir else '<run>'}\n"
+                f"python scripts/validate_placement.py report --set {vs}",
+                language="bash",
             )
-            scored_panel = [(a, anchor_scores[a.anchor_id]) for a in panel]
-            problems = panel_violations(scored_panel)
-            if problems:
-                st.error(
-                    "**Panel ordering violations** — the model disagrees with your labels here; "
-                    "placements near these rungs are unreliable:\n\n- " + "\n- ".join(problems)
-                )
-            else:
-                st.success(
-                    "Panel order validated: the model ranks all anchors in the same order as "
-                    "your assigned scores."
-                )
-
-        cols = st.columns(min(len(panel), 10))
-        for col, a in zip(cols * ((len(panel) // 10) + 1), panel):
-            with col:
-                p = anchor_image_path(a)
-                if p.exists():
-                    st.image(str(p), use_container_width=True)
-                ms = f" · model {anchor_scores[a.anchor_id]:.2f}" if a.anchor_id in anchor_scores else ""
-                st.caption(f"**{a.product_score:g}/10**{ms}" + (f" · {a.label}" if a.label else ""))
-                if st.button("remove", key=f"rm_{a.anchor_id}"):
-                    remove_anchor(a.anchor_id)
-                    st.rerun()
-
-        # ---- 2. cohort smoke test -------------------------------------
-        if len(panel) >= 3 and ckpt_anchor is not None:
-            with st.expander("Cohort smoke test — how does this ladder behave at scale?"):
-                st.caption(
-                    "Places every cohort face of this gender on the ladder using the "
-                    "checkpoint's precomputed per-face scores. Validates ladder behavior "
-                    "in bulk: band widths, inconsistent placements, coverage, and implied "
-                    "/10 vs the research BT /10."
-                )
-                ctx_csv = ROOT / "artifacts" / ckpt_anchor.parent.name / "model_scores.csv"
-                if not ctx_csv.exists():
-                    st.warning(
-                        f"No model_scores.csv for run {ckpt_anchor.parent.name} — run "
-                        "scripts/evaluate.py with --ratings first."
-                    )
-                elif st.button("Run smoke test", key="smoke_run"):
-                    cohort_sc = pd.read_csv(ctx_csv)
-                    cohort_sc = cohort_sc[cohort_sc["gender"] == panel_gender]
-                    scored_panel = [(a, anchor_scores[a.anchor_id]) for a in panel]
-
-                    placements = []
-                    for _, row in cohort_sc.iterrows():
-                        r = place_on_ladder(row["modelScore"], scored_panel)
-                        placements.append(
-                            {
-                                "faceId": row["faceId"],
-                                "theta": row["theta"],
-                                "implied": r["implied_score"],
-                                "bandWidth": r["band"][1] - r["band"][0],
-                                "inconsistent": r["inconsistent"],
-                                "outside": r["position"] != "within the panel",
-                            }
-                        )
-                    pl = pd.DataFrame(placements)
-
-                    c1, c2, c3, c4 = st.columns(4)
-                    c1.metric("Faces placed", f"{len(pl):,}")
-                    c2.metric("Median band width", f"{pl['bandWidth'].median():.2f}")
-                    c3.metric("Inconsistent", f"{pl['inconsistent'].mean():.1%}")
-                    c4.metric("Outside panel", f"{pl['outside'].mean():.1%}")
-
-                    cc1, cc2 = st.columns(2)
-                    cc1.plotly_chart(
-                        px.histogram(pl, x="implied", nbins=40,
-                                     title="Implied product /10 distribution"),
-                        use_container_width=True,
-                    )
-                    cc2.plotly_chart(
-                        px.scatter(pl, x="theta", y="implied", opacity=0.3,
-                                   hover_data=["faceId"],
-                                   title="Implied /10 vs BT theta"),
-                        use_container_width=True,
-                    )
-                    st.caption(
-                        "Reading guide: band width ≈ placement uncertainty in /10 points "
-                        "(median under ~1.5 is workable). Inconsistent or outside-panel "
-                        "rates above a few percent mean the ladder needs better anchors "
-                        "at the affected rungs. The scatter should rise monotonically; "
-                        "flat plateaus mean several BT tiers collapse onto one rung."
-                    )
-
-        # ---- 3. place test photos on the ladder ----------------------
-        st.subheader("Test photos against the ladder")
-        if len(panel) < 3:
-            st.info("Add at least 3 anchors to this panel to run placements.")
-        elif ckpt_anchor is None:
-            st.info("No checkpoint available.")
         else:
-            test_ups = st.file_uploader(
-                "Test photos", type=["jpg", "jpeg", "png", "webp"],
-                accept_multiple_files=True, key="anchor_test",
-            )
-            if test_ups:
-                import torch
-                from PIL import Image
+            item = queue[len(done)]
+            pa, pb = vdir / "photos" / item["a"], vdir / "photos" / item["b"]
+            jc = st.columns([1, 1])
+            for col, path in ((jc[0], pa), (jc[1], pb)):
+                with col:
+                    if path.exists():
+                        st.image(str(path), use_container_width=True)
+                    if st.button("More attractive", key=f"vote_{len(done)}_{path.name}",
+                                 use_container_width=True):
+                        with jfile.open("a") as fh:
+                            fh.write(json.dumps({
+                                "a": item["a"], "b": item["b"], "winner": path.name,
+                                "index": len(done),
+                            }) + "\n")
+                        st.rerun()
+            if st.button("Skip / can't tell", key=f"skip_{len(done)}"):
+                with jfile.open("a") as fh:
+                    fh.write(json.dumps({
+                        "a": item["a"], "b": item["b"], "winner": None, "index": len(done),
+                    }) + "\n")
+                st.rerun()
 
-                from faceiq_pref.preprocess import normalize_front_photo
-
-                scorer, cfg, tf = load_scorer_cached(str(ckpt_anchor))
-                scored_panel = [(a, anchor_scores[a.anchor_id]) for a in panel]
-
-                for up in test_ups:
-                    img = Image.open(up).convert("RGB")
-                    norm = normalize_front_photo(img)
-                    if norm is None:
-                        st.error(f"{up.name}: no face detected — skipped.")
-                        continue
-                    with torch.no_grad():
-                        u = scorer(tf(norm).unsqueeze(0)).item()
-
-                    res = place_on_ladder(u, scored_panel)
-                    lo, hi = res["band"]
-
-                    c_img, c_res = st.columns([1, 3])
-                    with c_img:
-                        st.image(norm, use_container_width=True)
-                        st.caption(up.name)
-                    with c_res:
-                        m1, m2, m3 = st.columns(3)
-                        m1.metric("Implied product score", f"{res['implied_score']:.2f} /10")
-                        m2.metric(
-                            "Confidence band",
-                            f"{lo:.1f} – {hi:.1f}" if lo != hi else "tight",
-                            help="Anchors with ambiguous win probability (25–75%) span this range",
-                        )
-                        m3.metric("Beats / loses", f"{res['n_beaten']} / {res['n_lost']}")
-                        if res["position"] != "within the panel":
-                            st.warning(f"Placement is {res['position']} — extend the ladder.")
-                        if res["inconsistent"]:
-                            st.error(
-                                "Inconsistent placement: beats an anchor labeled higher than one "
-                                "it loses to (panel ordering defect near this score)."
-                            )
-                        ladder_cols = st.columns(len(res["rows"]))
-                        for col, r in zip(ladder_cols, res["rows"]):
-                            with col:
-                                p = anchor_image_path(r["anchor"])
-                                if p.exists():
-                                    st.image(str(p), use_container_width=True)
-                        verdict = "beats" if r["beats"] else "loses"
-                        st.caption(
-                            f"**{r['anchor'].product_score:g}** · {verdict} "
-                            f"({r['p_win']:.0%})"
-                        )
-                    st.divider()
+        rep = vdir / "report.json"
+        if rep.exists():
+            with st.expander("Last report", expanded=True):
+                st.json(json.loads(rep.read_text()))
 
 
 # ---------------------------------------------------------------- pilot-500 labeler

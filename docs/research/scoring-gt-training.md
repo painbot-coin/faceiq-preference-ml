@@ -225,7 +225,7 @@ Target split: ~80% train / ~20% val matchups by face id.
 
 - [ ] Prisma §3.3 BT rating tables + admin dashboard
 - [ ] Apply human overrides to all 1,032 labeled rows in export finalize script (already in export JSON)
-- [ ] **Production anchor panel** — manually assigned `/10` ladder and/or v2 cohort with thinner decile tails (research log §5.2 elite crowding, §5.4 Path A/B)
+- [x] ~~**Production anchor panel** — manually assigned `/10` ladder~~ — **dropped 2026-08-04**, and the dashboard tab was removed with it. Hand-assigning what a 7 means substitutes one person's taste for 95,245 measured votes, and reference weights `p(1−p)` already discount the faces curation would have removed. A whole-scale correction belongs in the **anchor curve** (one function, §4 of `production-scoring-pipeline.md`); the v2-cohort half of this item is still open.
 
 ---
 

@@ -1,0 +1,176 @@
+FACEIQ ATTRACTIVENESS SCORING - CONSULTING BRIEF
+2026-08-04
+
+IN ONE BREATH
+We score attractiveness from pairwise "which face wins" comparisons, not 1-10 ratings.
+~52k pairs are labelled by a VLM; ~10k of those also have paid human panel votes mixed in.
+A Bradley-Terry fit turns those comparisons into a latent strength (theta) per cohort face.
+A siamese neural comparator is trained on the same pairs so it can judge new uploads.
+At inference we place an upload against ~200 known-theta references (1-D MLE), then map to
+a /10 score, a 7-tier band, and a crowd-agreement sentence via a fitted temperature T.
+
+
+GOAL
+Give someone who uploads a photo an attractiveness rating that is defensible: accurate,
+calibrated, and honest about its own uncertainty. It replaces a hand-tuned geometric
+formula that had no ground truth behind it and no way to know when it was wrong.
+
+
+1. WHY PAIRWISE, NOT RATINGS
+Our ground truth is gathered from A/B (pairwise) match ups. Asking people to rate a face 1-10 conflates where the face sits with where that rater's
+personal zero sits, and two honest raters differ by a constant nobody can measure. "Which
+of these two is more attractive" needs no shared scale. So we collect only comparisons and
+recover a scale afterwards. This drives the whole architecture. 
+
+
+2. THE DATA
+- 3,000 faces from our app's uploads, stratified across the old formula's deciles.
+- ~52,500 same-gender pairs labelled by a VLM (gemini-2.5-flash, fixed prompt). Human audit
+  on a 750-pair seeded sample: 84.9% agreement. 47,914 pairs survive QC into the fit.
+- Four rounds of paid human panel labelling on Prolific: 963 raters, 95,245 votes on 10,280 of
+  those pairs, $4,155. Runs 1-3 targeted near-ties; run 4 was a uniform random draw, which
+  is what made unbiased evaluation possible.
+Same-gender only, so the two comparison graphs are disconnected and every scale is
+per-gender.
+
+
+3. BRADLEY-TERRY
+Each face gets a latent strength theta, P(i beats j) = sigmoid(theta_i - theta_j), all
+thetas fit jointly by MLE over ~48k comparisons. Global solve: a face's score is informed
+by faces it never met, through chains of shared opponents.
+
+Gates we hold it to: graph connected, no face under 15 resolved comparisons, Spearman >
+0.95 between the full fit and an 80% subsample.
+
+Theta is identified only up to shift and scale, so a pre-registered monotone curve maps
+percentile -> /10. That curve is a product decision, not a measurement, and it is
+deliberately the one place "what counts as a 7" is defined.
+
+Resolution, measured: the median face's 95% rank interval is 237 of ~1,422 places, and two
+faces must be ~210 places apart to be statistically distinguishable. 0.00% of adjacent
+pairs are distinguishable. This is the most important number in the project and it is why
+we ship bands and tiers, not decimals.
+
+
+4. THE NEURAL COMPARATOR
+BT cannot score an unseen face, so we train a siamese net (ArcFace R50, 112px, shared-weight
+scorer, pairwise logistic loss) on (photoA, photoB, winner). Split by face id, never by
+pair. Best model sees 33,449 training pairs.
+
+It beats BT on near-tie pairs and loses to BT by 1.8-3.1 points on the global ordering, the
+deficit concentrated in the 10-45 percentile-gap band. Five arms against this - more labels,
+soft vs hard targets, human-grounded checkpoint selection, a variance head, 4x resolution -
+all tied. A run that saw no human labels loses the same bands. We read it as structural: BT
+solves a global system, the comparator only ever sees local pairs.
+
+
+5. WHAT WE SHIP - REFERENCE-SET PLACEMENT
+The comparator's raw scalar is unanchored by construction (only differences appear in the
+loss), so we use it the way it was trained.
+
+Precomputed: ~200 cohort faces per gender, tier-stratified, each with known theta and a
+cached comparator score. Per upload: crop -> one forward pass -> compare against all 200
+reference scores (signs only) -> fit the theta that explains those 200 outcomes ->
+percentile against the full cohort -> /10 -> tier and band.
+
+That fit is a 1-D conditional MLE. With p_j = sigmoid(theta - theta_j), the log-likelihood
+derivative is sum_j (y_j - p_j), so the answer is the theta at which predicted wins equal
+observed wins. Second derivative -sum_j p_j(1-p_j) is strictly negative, so Newton converges
+in a few steps and the curvature gives se(theta) = 1/sqrt(sum_j p_j(1-p_j)) free.
+
+Two consequences: each reference's weight is p_j(1-p_j), max 0.25 for an even matchup and
+near zero for a mismatch, so the set self-selects toward faces near the user and curating it
+is pointless. And a face beating every reference has no finite solution - we cap and flag.
+
+Held-out performance: median error 0.34 / 0.28 /10 (F/M), p90 0.93, tier-exact 67%,
+Spearman 0.926 against the ranking of record.
+
+
+6. TEMPERATURE - HOW UNCERTAINTY BECOMES A PRODUCT
+Run 4's uniform draw gave us, for thousands of pairs, both the /10 gap between the two faces
+and the fraction of raters who picked the higher-scoring one. Fit p = sigmoid(gap / T) over
+all of them. One free parameter. T = 1.920.
+
+T is the bluntness of the scale: how far apart two faces must be before people reliably
+agree. It transfers to a new user because it is a property of the scale, not of any pair -
+once someone is placed at 6.4, the gap to anything else is a number on that same scale.
+
+Consequences: 2-in-3 agreement needs a 1.33 point gap, 3-in-4 needs 2.11, 90% needs 4.22. A
+1-10 scale holds about seven 1.33-wide bands, and the rank-resolution number independently
+gives ~7 (1430/210) - two unrelated routes to the same answer, so we ship 7 tiers. Tier
+width is 9/7 = 1.286 against T*ln2 = 1.331, a ratio of 1.035, so "two thirds of people would
+place you above the tier below you" is almost exactly the scale's natural unit. That is the
+default user-facing sentence.
+
+
+7. THE NUMBER THAT MATTERS
+Full production path (comparator -> placement -> /10) on run 4's uniform pairs, 2,370 pairs:
+
+  predicting which face a CROWD prefers:    81.9%   vs 73.2% for a typical individual rater
+  matching one RANDOM person's opinion:     70.8%   vs 70.4% for another random person
+
+Both ceilings are one held-out rater against the majority of the others, which is the only
+honest comparator - 100% is unreachable because people disagree. Row one is the real claim:
+the system beats an individual human at anticipating group preference. Row two is a tie, and
+a tie is the correct outcome there.
+
+
+8. WHY WE STOPPED BUYING DATA
+Headroom analysis said $7,463 more labelling was justified - purchased votes beat the free
+VLM label on pairs under a 20-percentile gap, all intervals clear of zero. We then tested
+whether that quality reaches a user's score. Both routes are shut:
+
+- Through the reference set: hold the comparator fixed, swap the ranking supplying reference
+  theta from zero human votes to all 95,245. Accuracy moves 0.2 points, downward. Mechanism
+  is the p_j(1-p_j) weighting - reference errors average out over 200 comparisons.
+- Through the comparator's training set: best label recipe at best data volume. Dead tie,
+  +0.00 pts, 95% CI [-0.96, +0.96], paired bootstrap over 2,390 pairs.
+
+Label quality is no longer the binding constraint. We also nearly shipped a composite with
+the old geometric formula that improved agreement with BT by 11% (significant, replicated)
+while being flat-to-worse against actual human votes - BT is a proxy fitted on VLM labels,
+and the blend was fitting the proxy's error. Standing rule now: nothing counts unless it is
+scored against panel votes.
+
+
+9. WHAT WE WANT FROM YOU
+Direction plus a math audit. Specifically:
+
+a) Is reference-set placement the right way to put an unseen face on a BT scale, or is there
+   something better-founded? We know it is a conditional MLE holding the graph fixed, and
+   that a full refit would move reference thetas by ~0.4%.
+b) The comparator's global-ordering deficit. We concluded structural after five failed arms.
+   Right call, or is there an obvious objective/architecture we skipped - listwise or ranking
+   losses, distillation from BT theta, something else?
+c) Is the temperature fit sound, and is one global T defensible, or should it vary with
+   position on the scale?
+d) Are the uncertainty numbers honest? se from Fisher information, the 237-place rank
+   interval, and how we combine estimation and disagreement variance into one band.
+e) Is the "beats an individual human" claim stated correctly given two metrics with
+   different ceilings?
+f) Strategically: is this better than a well-engineered deterministic formula, now that we
+   have ground truth to benchmark against? The old formula alone scores 71.7% against the
+   73.2% human ceiling, which is closer than we expected.
+g) Anything unoptimised or obviously leaving accuracy on the table.
+
+WHERE THE MATH LIVES
+Narrative record is docs/research/scoring-gt-research-log.md - 5.1 for BT gates, 5.8 for
+everything recent. The actual math is in code and is the faster read:
+
+  src/faceiq_pref/bt.py                  BT fit and acceptance gates
+  src/faceiq_pref/placement.py           placement MLE, bands, tiers
+  src/faceiq_pref/calibrate.py           percentile -> /10 anchor curve
+  scripts/band_calibration.py            the temperature fit
+  scripts/accuracy_matrix.py             accuracy metrics and human ceilings
+  scripts/rank_resolution.py             rank intervals and resolution limits
+  scripts/ranking_value_to_placement.py  the "more labels don't help" measurement
+
+docs/research/production-scoring-pipeline.md is the end-to-end plan and the best single doc
+if you read only one. Every script has a docstring saying why it exists and what it found,
+including the negative results.
+
+OPEN AND UNMEASURED
+Everything above is measured on faces from the same 3,000. We are about to validate on faces
+from outside that pool - that is the one untested link. We also never collected test-retest
+data (same person, two photos), so per-person score stability is unknown and multi-photo
+band narrowing is unbuildable until we do.
