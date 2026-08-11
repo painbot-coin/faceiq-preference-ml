@@ -47,9 +47,7 @@ class PreferenceScorer(nn.Module):
             net = torch.hub.load("facebookresearch/dinov2", backbone, pretrained=pretrained)
             feat_dim = DINOV2_BACKBONES[backbone]
         elif is_arcface_backbone(backbone):
-            if backbone != "arcface_r50":
-                raise ValueError(f"unsupported ArcFace variant {backbone!r}")
-            net = ArcFaceBackbone()
+            net = ArcFaceBackbone(backbone)
             feat_dim = ARCface_BACKBONES[backbone]
         elif backbone in BACKBONES:
             ctor, weights, feat_dim = BACKBONES[backbone]

@@ -1,0 +1,45 @@
+# Warm-start from train-v23b-bt-distill-gpu (current best: 82.6% bothHeldOut majority).
+#
+# Idea: v23b already absorbed vote-blind BT soft targets into the weights. Now drop
+# the distill loss and short fine-tune on the same panel-hard + export recipe so
+# humans can pull without re-pulling the teacher every step.
+#
+# Kill if bothHeldOut majority ≤ 82.6% within noise (labs_composite_eval --leakage-split).
+#
+# Run (GPU):
+#   python scripts/train.py --config configs/train-v25-panel-ft-v23b.yaml
+#   python scripts/evaluate.py --checkpoint checkpoints/train-v25-panel-ft-v23b/best.pt \
+#       --ratings artifacts/bt-refit-v5-panel/ratings.csv
+#   python scripts/labs_composite_eval.py --run train-v25-panel-ft-v23b --leakage-split
+
+export_dir: data/exports/cmr1mr0m7000196d57zi3vcgn
+run_name: train-v25-panel-ft-v23b
+
+backbone: arcface_r50
+freeze_backbone: false
+image_size: 112
+batch_size: 32
+epochs: 5
+lr: 0.000005
+weight_decay: 0.0001
+
+val_fraction: 0.2
+split_seed: 42
+num_workers: 4
+skip_ties: true
+augment: true
+
+init_checkpoint: checkpoints/train-v23b-bt-distill-gpu/best.pt
+
+# No BT distill — teacher already baked into the warm-start weights.
+# (omit bt_ratings / bt_distill_weight)
+
+panel_labels:
+  - [labels/panel-pilot/results, labels/panel-pilot/sample-meta.json]
+  - [labels/panel-run-3/results, labels/panel-run-3/sample-meta.json]
+panel_rejects:
+  - artifacts/panel-run-v1/reject-pids.txt
+  - artifacts/panel-run-v3/reject-pids.txt
+panel_min_votes: 4
+panel_prior: 1.0
+panel_hard: true

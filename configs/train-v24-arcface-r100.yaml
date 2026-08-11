@@ -1,0 +1,43 @@
+# Comparator arm — next backbone axis (team report).
+#
+# Same label recipe and ship split as train-v14-panel-ship; only the face-pretrained
+# backbone changes: InsightFace antelopev2 glintr100 (R100 @ Glint360K) instead of
+# buffalo_l w600k_r50. Image size stays 112 (native for both packs).
+#
+# Success metric (only one that counts):
+#   labs_composite_eval.py --leakage-split → bothHeldOut panel majority
+# Kill if ≤ train-v14 (78.4%) within noise. Do not start until v23b is scored.
+#
+# Run (GPU):
+#   pip install -e ".[arcface]"
+#   python scripts/train.py --config configs/train-v24-arcface-r100.yaml
+#   python scripts/evaluate.py --checkpoint checkpoints/train-v24-arcface-r100/best.pt \
+#       --ratings artifacts/bt-refit-v5-panel/ratings.csv
+#   python scripts/labs_composite_eval.py --run train-v24-arcface-r100 --leakage-split
+
+export_dir: data/exports/cmr1mr0m7000196d57zi3vcgn
+run_name: train-v24-arcface-r100
+
+backbone: arcface_r100
+freeze_backbone: false
+image_size: 112
+batch_size: 32
+epochs: 10
+lr: 0.00001
+weight_decay: 0.0001
+
+val_fraction: 0.2
+split_seed: 42
+num_workers: 4
+skip_ties: true
+augment: true
+
+panel_labels:
+  - [labels/panel-pilot/results, labels/panel-pilot/sample-meta.json]
+  - [labels/panel-run-3/results, labels/panel-run-3/sample-meta.json]
+panel_rejects:
+  - artifacts/panel-run-v1/reject-pids.txt
+  - artifacts/panel-run-v3/reject-pids.txt
+panel_min_votes: 4
+panel_prior: 1.0
+panel_hard: true

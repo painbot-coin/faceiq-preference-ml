@@ -58,6 +58,11 @@ which is the band's central claim, tested off-cohort for the first time and pass
 Log **§5.10** / **§5.10a**; read the caveats there before quoting anything — one rater, uniform pair
 draws, and the /10 as an *absolute* is still untested off-cohort.
 
+**Comparator ship (2026-08-10):** `train-v23b-bt-distill-gpu` is current best on the shared
+yardstick — **82.6%** bothHeldOut majority (n=109, uniform run-4) vs v14’s 78.4%; R100
+(`train-v24-arcface-r100`) killed at 78.4% (pooled hid memorisation). Lane notes:
+[`meruzhan-next-steps.md`](./meruzhan-next-steps.md).
+
 Steps 1–4 below are ✓ **complete**. Labeling (`cmr1mr0m7000196d57zi3vcgn`, 52,414 pairs, 84.9% audit)
 finished 2026-07-04; BT and the comparator followed; **three** Prolific studies (plus a $106 soft launch)
 bought **95,245 usable human votes** from 963 raters for **$4,155**; the comparator was retrained on those
@@ -144,7 +149,7 @@ programme, measured: pay for the pairs machines cannot resolve, take the rest fo
 | ~~1~~ | ~~Run `train-v16-panel-run4`~~ ✅ **done 2026-08-04 — and it confirmed the diagnosis by failing to help.** 67.43%, a tie with `train-v12` (+0.25 [−0.95, +1.46]), still **2.09 pts behind the ranking**, 10–20 band still 8.5 pts adrift | $2 of GPU | Panel coverage of the train split went 14.7% → 19.4% with the new pairs aimed at exactly the weak bands, and it changed nothing there. **The 10–45 deficit is now measured to be an extraction failure, not a label shortage** — no labelling programme can close it. Log §5.8 |
 | ~~1~~ | ~~Fix the comparator's 10–45 band by training~~ ❌ **five arms, five ties, closed 2026-08-04.** More labels (v16), soft vs hard targets (v12/v13), fixed checkpoint selection (v17), a variance head (v19), and 4× resolution (v20/v21) all land 1.8–2.1 pts behind BT with the 10–20 band stuck near 55% against 63.2% | ~$15 of GPU | `train-v10`, which saw **no** panel labels, loses the same bands. BT solves a *global* system over 47,914 comparisons; the comparator only ever sees *local* pairs. It is not a tuning problem. Log **§5.8** |
 | **1** | **Ship the band as a tier** — `T = 1.920`, half-width `T·logit(agreement)/2` in percentile space, displayed as one of **~7 tiers**, at 2-in-3 agreement plus a 90% floor claim | **free** | p90 placement error is **0.93 /10** on the best checkpoint (the widely-quoted 1.33 came from a `val_fraction 0.5` arm — see below), so a point score still overclaims and this fixes its presentation for nothing. Two independent measurements say ~7 tiers, and 2-in-3 agreement is *exactly one tier down* (`T·ln2 / (9/7) = 1.035`), which settles the last open product call. |
-| **1a-new** | **Use `train-v14-panel-ship`, not the newest checkpoint** — and queue `train-v22-ship-0.2` | **free / ~$2 GPU** | New 2026-08-04. `scripts/placement_by_checkpoint.py --common-val` ranks checkpoints on *placement* error rather than val accuracy, scoring all of them on the same held-out faces. v14 places at **0.34 / 0.28** median /10 with **67%** tier-exact against **0.44–0.47** and **55–57%** for every v12–v21 arm — because those arms ran at `val_fraction 0.5` to hold out panel pairs and so trained on 13k pairs instead of 33k. They were controlled label-recipe comparisons, never production candidates. `train-v22-ship-0.2` combines v17's labels with v14's data volume and is the only cheap experiment left with obvious upside. |
+| ~~**1a-new**~~ | ~~Use `train-v14-panel-ship` / queue `train-v22-ship-0.2`~~ → **ship `train-v23b-bt-distill-gpu`** | **done** | v22 was +0.0 vs panel; unfrozen BT soft-distill (**v23b**) hits **82.6%** bothHeldOut majority (n=109). R100 (**v24**) killed at 78.4%. Next axes in [`meruzhan-next-steps.md`](./meruzhan-next-steps.md) — short FT off v23b or non-ArcFace ensemble, not more R100. |
 | **1a** | **Normalisation parity audit** — does the production upload path apply the exact faceiq-labs MediaPipe eye-level crop the cohort went through? | **free** | A per-face error that no ranking scheme cancels, and the cheapest real bug to rule out. **Largely answered 2026-08-04**: 644 real user uploads from today, pulled straight from labs blob storage, are 1024×1024 like the cohort, detect a face 25/25, and the normaliser moves them **7.85** mean abs pixel value against **7.66** for cohort photos. Same crop pipeline. Strong evidence rather than proof — equal residual magnitude is not a pixel-identical crop — but it demotes preprocessing as a suspect for odd upload scores. |
 | **1b** | **Wire reference-set placement into inference** — 200 stratified cohort faces of known θ, MLE for θ_new, `se` from the curvature | **free** | Buys the per-user standard error the band wants, a θ-scale position, and explicit handling of the ~16% of top-tier faces with no finite solution. Note it does **not** repair the score: a rank is already shift-invariant, so it matches the raw scalar's ordering (0.857 F). See `production-scoring-pipeline.md` §2–3. |
 | **1b-bis** | **Validate off-cohort** — ✅ **female set done 2026-08-05, and the ordering passes.** 385 judgements over 70 unseen faces: **84.3%** [80.1, 87.8] agreement against the rater's own **97.1%** ceiling, gap-quintile accuracy **monotone 62.3% → 97.1%**, τ **+0.618**. Male set still open (6 of 385). Earlier finding stands: the id-level exclusion list was applied correctly and still let through **113 of 998 photos (11%) that are cohort people re-uploading**, invisible to ids, caught by ArcFace | **free** | **Was the only untested link in the chain**, and it held. Two readings to carry forward: the monotone curve means the score knows when to trust itself off-cohort, and `T = 1.920` predicted 67.4% against 84.3% observed — **do not refit it on one rater**, T describes a random rater. The /10 as an *absolute* is still untested off-cohort: no hand ranges, and the set's median sits at percentile 0.368. Log **§5.10**, `production-scoring-pipeline.md` §7. |
@@ -199,11 +204,12 @@ Earlier plans now live in [`archive/`](./archive/README.md).
 
 ## What each doc is for
 
-**Eleven live docs.** Everything else is in [`archive/`](./archive/README.md).
+**Twelve live docs.** Everything else is in [`archive/`](./archive/README.md).
 
 | Document | Role | When to open it |
 |----------|------|-----------------|
 | [`README.md`](./README.md) | **Start here** — current state, what is unknown, priority order | First thing in a new context |
+| [`consult-a-placement-audit.md`](./consult-a-placement-audit.md) | **Consult (a)** — is reference-set placement the right estimator? | Brief §9a; before wiring or replacing placement |
 | [`programme-direction-review.md`](./programme-direction-review.md) | **Strategy** — are we going the right way, when to stop, what plan B is, the band maths | Before committing money or changing direction |
 | [`scoring-gt-research-log.md`](./scoring-gt-research-log.md) | **Notebook** — what you did, numbers, decisions | **During and after** each step; §5.8 is the newest finding |
 | [`scoring-gt-training.md`](./scoring-gt-training.md) | **This repo's charter** — the offline ML checklist | "What is the next ML task?" |
@@ -241,6 +247,7 @@ not sequential reading. If a doc's status line goes stale, fix it in the same ch
 | What should I do this week? | Run `configs/train-v16-panel-run4.yaml` on the GPU box, then `eval_vs_panel.py` on run 4's pairs |
 | Should we buy more labels? | **No.** `panel-study-playbook.md` §2a and §2b — the buy zone has a measured outer edge and the remaining $7,463 is blocked on the model |
 | Is this whole approach working? | `programme-direction-review.md` — yes, and the bottleneck moved from data to the model |
+| Is reference-set placement the right estimator? | **`consult-a-placement-audit.md`** — yes, ship with caveats; full BT refit is not better; accuracy lever is (b) |
 | How do we show a rating band? | `programme-direction-review.md` §5 — three different bands, only one is measurable today, and interval intersection is the wrong rule |
 | Which ranking do I use? | **`bt-refit-v5-panel`** to score. **`bt-refit-v2-qc`** to cut bands or calibrate — it is the only fit that predates the human votes |
 | How does the admin UI / batch work? | `vlm-pilot-spec.md` (labeling done; use export route) |
@@ -255,6 +262,7 @@ not sequential reading. If a doc's status line goes stale, fix it in the same ch
 |----------|---------|
 | [`scoring-gt-core.md`](./scoring-gt-core.md) | Canonical plan — phases, 3k × 35, BT, VLM consensus |
 | [`scoring-gt-research-log.md`](./scoring-gt-research-log.md) | Living log — record at gates; artifact pointers |
+| [`consult-a-placement-audit.md`](./consult-a-placement-audit.md) | Consult (a) — placement estimator verdict |
 | [`production-scoring-pipeline.md`](./production-scoring-pipeline.md) | The shipping pipeline — built / measured / blocked, in order |
 | [`programme-direction-review.md`](./programme-direction-review.md) | Strategy — direction, stop rules, plan B, band maths |
 | [`vlm-pilot-spec.md`](./archive/vlm-pilot-spec.md) | Pairwise admin + pilot (done) + §15 scale batch |

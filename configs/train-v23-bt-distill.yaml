@@ -1,0 +1,56 @@
+# Consult (b): distill the vote-blind BT ranking into the comparator.
+#
+# Never tried before. Every prior arm used pairwise logistic on VLM/human winners;
+# none regressed onto BT θ. Soft targets = sigmoid((θ_a - θ_b) / T) from
+# bt-refit-v2-qc (predates every panel vote — teacher is not circular with the
+# success metric).
+#
+# Recipe: warm-start from train-v14-panel-ship, freeze ArcFace backbone, retarget
+# all non-panel train pairs to pure BT soft (w=1). Keep panel hard labels on the
+# pairs humans covered. Select checkpoint on panel_val_accuracy.
+#
+# Success = leakage-split bothHeldOut vs panel majority
+#   (scripts/labs_composite_eval.py --leakage-split), not val_accuracy.
+#
+# CPU note: freeze_backbone keeps this runnable without a GPU; unfreeze on the
+# g5 box if the head-only arm moves the metric.
+#
+# Run:
+#   python scripts/train.py --config configs/train-v23-bt-distill.yaml
+#   python scripts/evaluate.py --checkpoint checkpoints/train-v23-bt-distill/best.pt
+#   python scripts/labs_composite_eval.py --run train-v23-bt-distill --leakage-split
+
+export_dir: data/exports/cmr1mr0m7000196d57zi3vcgn
+run_name: train-v23-bt-distill
+
+backbone: arcface_r50
+freeze_backbone: true
+image_size: 112
+batch_size: 32
+# 2 epochs is enough for a head-only warm-start signal on CPU (~3h/epoch).
+# Bump to 5–10 and set freeze_backbone: false on the GPU box if this moves majority.
+epochs: 2
+lr: 0.0001
+weight_decay: 0.0001
+
+val_fraction: 0.2
+split_seed: 42
+num_workers: 0
+skip_ties: true
+augment: true
+
+init_checkpoint: checkpoints/train-v14-panel-ship/best.pt
+
+bt_ratings: artifacts/bt-refit-v2-qc/ratings.csv
+bt_distill_weight: 1.0
+bt_distill_temperature: 1.0
+
+panel_labels:
+  - [labels/panel-pilot/results, labels/panel-pilot/sample-meta.json]
+  - [labels/panel-run-3/results, labels/panel-run-3/sample-meta.json]
+panel_rejects:
+  - artifacts/panel-run-v1/reject-pids.txt
+  - artifacts/panel-run-v3/reject-pids.txt
+panel_min_votes: 4
+panel_prior: 1.0
+panel_hard: true

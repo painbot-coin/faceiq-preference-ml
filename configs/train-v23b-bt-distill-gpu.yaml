@@ -1,0 +1,46 @@
+# Consult (b) — GPU follow-up to train-v23-bt-distill.
+#
+# CPU head-only distill did not move bothHeldOut majority (78.6% vs v14 78.4%).
+# This arm unfreezes ArcFace and fine-tunes e2e from v14 with the same BT soft
+# targets (vote-blind bt-refit-v2-qc) + panel hard labels on covered pairs.
+#
+# Success = labs_composite_eval.py --leakage-split bothHeldOut vs panel majority.
+#
+# Run on g5:
+#   python scripts/train.py --config configs/train-v23b-bt-distill-gpu.yaml
+#   python scripts/evaluate.py --checkpoint checkpoints/train-v23b-bt-distill-gpu/best.pt \
+#       --ratings artifacts/bt-refit-v5-panel/ratings.csv
+#   python scripts/labs_composite_eval.py --run train-v23b-bt-distill-gpu --leakage-split
+
+export_dir: data/exports/cmr1mr0m7000196d57zi3vcgn
+run_name: train-v23b-bt-distill-gpu
+
+backbone: arcface_r50
+freeze_backbone: false
+image_size: 112
+batch_size: 32
+epochs: 10
+lr: 0.00001
+weight_decay: 0.0001
+
+val_fraction: 0.2
+split_seed: 42
+num_workers: 4
+skip_ties: true
+augment: true
+
+init_checkpoint: checkpoints/train-v14-panel-ship/best.pt
+
+bt_ratings: artifacts/bt-refit-v2-qc/ratings.csv
+bt_distill_weight: 1.0
+bt_distill_temperature: 1.0
+
+panel_labels:
+  - [labels/panel-pilot/results, labels/panel-pilot/sample-meta.json]
+  - [labels/panel-run-3/results, labels/panel-run-3/sample-meta.json]
+panel_rejects:
+  - artifacts/panel-run-v1/reject-pids.txt
+  - artifacts/panel-run-v3/reject-pids.txt
+panel_min_votes: 4
+panel_prior: 1.0
+panel_hard: true

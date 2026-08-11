@@ -89,6 +89,17 @@ class TrainConfig:
     # still Gemini labels, blind spot included, so at weight 1.0 the human corrections are a
     # minority vote against the very labels they exist to overrule.
     panel_weight: float = 1.0
+    # BT soft-target distillation (consult brief §9b — never tried before). When
+    # `bt_distill_weight` > 0 and `bt_ratings` is set, train targets become
+    #   (1 - w) * base + w * sigmoid((θ_a - θ_b) / T)
+    # where base is the panel vote share if present else the export hard winner.
+    # Panel pairs always keep their human target (humans beat the teacher). Use a
+    # vote-blind ranking (bt-refit-v2-qc) as teacher so panel eval is not circular.
+    bt_ratings: str | None = None
+    bt_distill_weight: float = 0.0
+    bt_distill_temperature: float = 1.0
+    # Warm-start from an existing checkpoint (fine-tune). Architecture must match.
+    init_checkpoint: str | None = None
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> "TrainConfig":
@@ -133,6 +144,7 @@ class PairDataset(Dataset):
         augment: bool,
         targets: dict[int, float] | None = None,
         target_weight: float = 1.0,
+        heavy_indices: set[int] | None = None,
     ):
         self.rows = matchups
         self.faces = faces
@@ -140,6 +152,9 @@ class PairDataset(Dataset):
         self.tf = build_transforms(backbone, image_size, augment)
         self.targets = targets or {}
         self.target_weight = target_weight
+        # Only these pair_index values get `target_weight` (panel pairs). BT-distill
+        # retargets must not inherit the panel upweight.
+        self.heavy_indices = heavy_indices or set()
 
     def __len__(self) -> int:
         return len(self.rows)
@@ -152,9 +167,10 @@ class PairDataset(Dataset):
     def __getitem__(self, idx: int):
         m = self.rows[idx]
         # A human vote share, where the panel covered this pair, beats the export's winner:
-        # it says which face and by how much. Everything else keeps the export label.
+        # it says which face and by how much. Everything else keeps the export label
+        # (or a BT soft target written into `targets` by the distill path).
         label = self.targets.get(m.pair_index)
-        weight = self.target_weight if label is not None else 1.0
+        weight = self.target_weight if m.pair_index in self.heavy_indices else 1.0
         if label is None:
             label = 1.0 if m.final_outcome == "A" else 0.0 if m.final_outcome == "B" else 0.5
         return (
@@ -163,6 +179,29 @@ class PairDataset(Dataset):
             torch.tensor(float(label)),
             torch.tensor(float(weight)),
         )
+
+
+def load_bt_soft_targets(
+    rows: list[Matchup],
+    ratings_csv: str | Path,
+    temperature: float = 1.0,
+) -> dict[int, float]:
+    """P(A wins) under the BT teacher: sigmoid((θ_a - θ_b) / T)."""
+    import math
+
+    import pandas as pd
+
+    if temperature <= 0:
+        raise ValueError("bt_distill_temperature must be > 0")
+    rank = pd.read_csv(ratings_csv)
+    theta = dict(zip(rank["faceId"], rank["theta"]))
+    out: dict[int, float] = {}
+    for m in rows:
+        ta, tb = theta.get(m.face_a_id), theta.get(m.face_b_id)
+        if ta is None or tb is None:
+            continue
+        out[m.pair_index] = 1.0 / (1.0 + math.exp(-(ta - tb) / temperature))
+    return out
 
 
 def _apply_confidence_filter(rows: list[Matchup], floor: str) -> list[Matchup]:
@@ -255,11 +294,12 @@ def train(export: Export, cfg: TrainConfig) -> dict:
     train_rows = _filter_rows(train_rows, faces, export, cfg)
     val_rows = _filter_rows(val_rows, faces, export, cfg)
 
-    # Panel targets go on the train split only. Rewriting val labels too would move the
-    # yardstick and the model in the same experiment, leaving val accuracy uninterpretable;
-    # `scripts/eval_vs_panel.py` is how a checkpoint gets measured against humans, and it
-    # only scores pairs whose faces this run held out.
+    # Panel / BT-distill targets go on the train split only. Rewriting val labels too would
+    # move the yardstick and the model in the same experiment, leaving val accuracy
+    # uninterpretable; `scripts/eval_vs_panel.py` / leakage-split majority is how a checkpoint
+    # gets measured against humans.
     targets: dict[int, float] = {}
+    panel_covered: set[int] = set()
     if cfg.panel_labels:
         panels = [(r, m) for r, m in cfg.panel_labels]
         targets = load_panel_targets(
@@ -269,6 +309,7 @@ def train(export: Export, cfg: TrainConfig) -> dict:
             prior=cfg.panel_prior,
             hard=cfg.panel_hard,
         )
+        panel_covered = set(targets)
         hit = [m for m in train_rows if m.pair_index in targets]
         soft = sum(1 for m in hit if 0.35 < targets[m.pair_index] < 0.65)
         flipped = sum(
@@ -288,6 +329,41 @@ def train(export: Export, cfg: TrainConfig) -> dict:
         )
         val_hit = sum(1 for m in val_rows if m.pair_index in targets)
         print(f"  val split keeps export labels throughout ({val_hit:,} panel pairs untouched)")
+
+    if cfg.bt_distill_weight > 0:
+        if not cfg.bt_ratings:
+            raise ValueError("bt_distill_weight > 0 requires bt_ratings")
+        w = cfg.bt_distill_weight
+        if not 0.0 < w <= 1.0:
+            raise ValueError("bt_distill_weight must be in (0, 1]")
+        bt_soft = load_bt_soft_targets(
+            train_rows, cfg.bt_ratings, cfg.bt_distill_temperature
+        )
+        n_mixed = n_pure = n_skip = 0
+        for m in train_rows:
+            if m.pair_index in panel_covered:
+                continue  # humans beat the teacher
+            soft = bt_soft.get(m.pair_index)
+            if soft is None:
+                n_skip += 1
+                continue
+            if m.pair_index in targets:
+                base = targets[m.pair_index]
+            elif m.final_outcome == "A":
+                base = 1.0
+            elif m.final_outcome == "B":
+                base = 0.0
+            else:
+                base = 0.5
+            targets[m.pair_index] = (1.0 - w) * base + w * soft
+            n_pure += int(w >= 1.0 - 1e-12)
+            n_mixed += int(w < 1.0 - 1e-12)
+        print(
+            f"BT distill: teacher={cfg.bt_ratings} T={cfg.bt_distill_temperature} w={w} "
+            f"-> {n_pure + n_mixed:,} train pairs retargeted "
+            f"({n_pure:,} pure soft, {n_mixed:,} mixed), "
+            f"{len(panel_covered):,} panel pairs kept human, {n_skip:,} missing θ"
+        )
 
     # Human-grounded validation. These are val-split pairs, so no face here was trained on and
     # no vote here entered the loss — the same leak guard `eval_vs_panel.py` applies, just
@@ -314,7 +390,7 @@ def train(export: Export, cfg: TrainConfig) -> dict:
 
     train_ds = PairDataset(
         train_rows, faces, export, cfg.backbone, cfg.image_size, cfg.augment,
-        targets=targets, target_weight=cfg.panel_weight,
+        targets=targets, target_weight=cfg.panel_weight, heavy_indices=panel_covered,
     )
     val_ds = PairDataset(val_rows, faces, export, cfg.backbone, cfg.image_size, augment=False)
     train_dl = DataLoader(
@@ -333,6 +409,13 @@ def train(export: Export, cfg: TrainConfig) -> dict:
         )
 
     model = PairwiseModel(cfg.backbone, variance_head=cfg.variance_head).to(device)
+    if cfg.init_checkpoint:
+        ckpt = torch.load(cfg.init_checkpoint, map_location=device)
+        model.load_state_dict(ckpt["model"])
+        print(
+            f"warm-start from {cfg.init_checkpoint} "
+            f"(epoch {ckpt.get('epoch', '?')}, selected_on={ckpt.get('selected_on')})"
+        )
     if cfg.freeze_backbone:
         for p in model.scorer.backbone.parameters():
             p.requires_grad = False
