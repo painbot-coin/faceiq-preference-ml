@@ -24,6 +24,8 @@ Human level on that draw: **73.2%**. Ranking control on bothHeldOut ≈ **85%**.
 | `ensemble-v25-v1` | 77.8% | 108 | 86.1% (−8.3) | **killed** |
 | `ensemble-v25-v4` | 81.7% | 109 | 85.3% (−3.7) | **killed** |
 | `ensemble-v25-dino` | 78.6% | 112 | 84.8% (−6.2) | **killed** |
+| `train-v26-margin-ft-v25` | 79.3% | 111 | 85.6% (−6.3) | **killed** |
+| `train-v27-neartie-ft-v25` | 80.4% | 112 | 84.8% (−4.5) | **killed** |
 
 \*Labs pooled figure from the team report; not the same leakage stratum.
 
@@ -40,6 +42,8 @@ Human level on that draw: **73.2%**. Ranking control on bothHeldOut ≈ **85%**.
 | Score ensemble v25+ResNet18 (v1) | 77.8% — kill; +8.9 in-sample advantage |
 | Score ensemble v25+ResNet18-tuned (v4) | 81.7% — kill vs v25 |
 | Score ensemble v25+DINOv2 (v3) | 78.6% — kill |
+| Margin ranking FT from v25 (v26) | **79.3%** — kill; −4.5 vs v25 bothHeldOut |
+| Near-tie BT-gap weighted BCE FT (v27) | **80.4%** — kill; −3.4 vs v25 bothHeldOut |
 | Global Labs blend | Do not blend |
 
 ### v23b detail
@@ -86,21 +90,56 @@ recipe). Helped τ in the VLM era; **hurts panel majority on bothHeldOut** now.
 
 Do not ship. Helper: `scripts/score_ensemble_from_csvs.py`.
 
+## Closed: `train-v26-margin-ft-v25`
+
+Warm-start v25 → margin ranking loss only (5 ep, lr 5e-6, no distill). Best ep 3.
+
+| Stratum | placed | v2-qc | margin |
+|---|---:|---:|---:|
+| both trained (1501) | 82.9% | 81.5% | +1.4% |
+| one held out (756) | 81.7% | 82.3% | −0.5% |
+| both held out (111) | **79.3%** | 85.6% | −6.3% |
+
+**Kill.** bothHeldOut 79.3% ≤ v25 83.8% (−4.5). In-sample advantage +7.7% [+1.1, +14.6]; held-out collapsed while train strata stayed flat — margin loss did not help Goal A.
+
+## Closed: `train-v27-neartie-ft-v25`
+
+Warm-start v25 → BCE + near-tie BT-gap weights from vote-blind `bt-refit-v2-qc`
+(eps=0.1, no distill). Best ep 2 on panel_val. Uniform run-4, panel majority.
+
+| Stratum | placed | v2-qc | margin |
+|---|---:|---:|---:|
+| both trained (1503) | 82.3% | 81.6% | +0.7% |
+| one held out (758) | 80.3% | 82.3% | −2.0% |
+| both held out (112) | **80.4%** | 84.8% | −4.5% |
+
+**Kill.** bothHeldOut 80.4% ≤ v25 83.8% (−3.4). In-sample advantage +5.2%.
+Matches the audit caveat: the 8 control-right misses were not near-tie-concentrated,
+so upweighting |Δθ| did not move Goal A.
+
 ## Next
+Still ~1.8 pts behind ranking control (v25 remains ship baseline).
 
-Still ~1.8 pts behind ranking control. Open bets that are not “more labels / bigger ArcFace /
-blend with a weak ImageNet run”:
+1. **`train-v26-margin-ft-v25`** — **killed** (bothHeldOut 79.3% / n=111 vs v25 83.8%).
+2. **Error audit (done)** — `artifacts/train-v25-panel-ft-v23b/bothHeldOut-error-audit.json`.
+   18 model errors on uniform run-4 bothHeldOut — **8** control-right / model-wrong,
+   **10** both-wrong. The 8 are **not** concentrated in small BT gaps (only 3/8 with
+   |Δθ|<1; median ≈2.55; 4/8 with |Δθ|≥3).
+3. **`train-v27-neartie-ft-v25`** — **killed** (bothHeldOut 80.4% / n=112 vs v25 83.8%;
+   control 84.8%). Near-tie weighting confirmed live (30,599/33,449 train pairs) but
+   did not help held-out majority.
 
-1. **Coordinate with Harsh** — data lab / any new feature signals before another GPU day.
-2. **Lower distill weight warm-start** (v23b → w=0.3 panel+soft mix) only if Harsh agrees
-   the GPU queue is free; otherwise pause comparator configs.
+Later (fusion bet, not a blocker): Harsh data lab / new feature signals.
 
-Do **not** re-open gap-routing, head-only distill, R100, or ResNet score ensembles.
+Do **not** re-open gap-routing, head-only distill, R100, ResNet/DINOv2 score ensembles,
+margin-loss FT, or near-tie BT-gap weighted BCE FT from v25.
 
 ## Report line for the team
 
-```text
+```
 comparator train-v25-panel-ft-v23b: bothHeldOut majority = 83.8% (n=111, uniform run-4)
   vs ranking control 85.6% (−1.8); still ship baseline
+train-v26-margin-ft-v25: 79.3% (n=111) vs control 85.6% (−6.3) — killed (≤83.8%)
+train-v27-neartie-ft-v25: 80.4% (n=112) vs control 84.8% (−4.5) — killed (≤83.8%)
 score ensembles v25+{v1,v4,dino}: 77.8% / 81.7% / 78.6% — all killed (hurt held-out)
 ```

@@ -1,0 +1,48 @@
+# Warm-start from train-v25-panel-ft-v23b (current best: 83.8% bothHeldOut majority).
+#
+# Idea: change supervision only — margin ranking hinge on s_winner - s_loser instead of
+# BCEWithLogits. Same panel-hard + export recipe, no distill, so the kill criterion is a
+# clean test of rank-style loss vs the BCE baseline.
+#
+# Kill if bothHeldOut majority ≤ 83.8% (labs_composite_eval --leakage-split, uniform run-4,
+# panel majority).
+#
+# Run (GPU):
+#   python scripts/train.py --config configs/train-v26-margin-ft-v25.yaml
+#   python scripts/evaluate.py --checkpoint checkpoints/train-v26-margin-ft-v25/best.pt \
+#       --ratings artifacts/bt-refit-v5-panel/ratings.csv
+#   python scripts/labs_composite_eval.py --run train-v26-margin-ft-v25 --leakage-split
+
+export_dir: data/exports/cmr1mr0m7000196d57zi3vcgn
+run_name: train-v26-margin-ft-v25
+
+backbone: arcface_r50
+freeze_backbone: false
+image_size: 112
+batch_size: 32
+epochs: 5
+lr: 0.000005
+weight_decay: 0.0001
+
+val_fraction: 0.2
+split_seed: 42
+num_workers: 4
+skip_ties: true
+augment: true
+
+init_checkpoint: checkpoints/train-v25-panel-ft-v23b/best.pt
+
+# Rank-style supervision (the only intentional change vs v25).
+loss_type: margin
+margin: 1.0
+# (omit bt_ratings / bt_distill_weight / bt_gap_weighting — pure loss swap)
+
+panel_labels:
+  - [labels/panel-pilot/results, labels/panel-pilot/sample-meta.json]
+  - [labels/panel-run-3/results, labels/panel-run-3/sample-meta.json]
+panel_rejects:
+  - artifacts/panel-run-v1/reject-pids.txt
+  - artifacts/panel-run-v3/reject-pids.txt
+panel_min_votes: 4
+panel_prior: 1.0
+panel_hard: true

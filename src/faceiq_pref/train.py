@@ -1,7 +1,8 @@
 """Training loop for the pairwise preference comparator.
 
 Data flow: export dir -> face-id split -> PairDataset (loads photos lazily) ->
-BCE-with-logits on winner -> checkpoints/<run>/best.pt + artifacts/<run>/metrics.json.
+BCE-with-logits (default) or margin ranking hinge (`loss_type: margin`) on winner ->
+checkpoints/<run>/best.pt + artifacts/<run>/metrics.json.
 
 Set `panel_labels` in the config to replace the export's hard winner with a human vote share
 on the pairs our Prolific panel judged. That applies to the train split only — see the note
@@ -100,6 +101,16 @@ class TrainConfig:
     bt_distill_temperature: float = 1.0
     # Warm-start from an existing checkpoint (fine-tune). Architecture must match.
     init_checkpoint: str | None = None
+    # Pairwise supervision. Default BCE keeps older configs identical.
+    # `margin`: hinge on score gap — relu(m - (s_winner - s_loser)), winner from label >= 0.5.
+    # Uses the same pairwise logit s(A)-s(B) the BCE path already computes.
+    loss_type: str = "bce"  # bce | margin
+    margin: float = 1.0  # hinge width when loss_type=margin
+    # Optional near-tie upweight from a vote-blind BT ranking (reuse bt_ratings path).
+    # weight *= 1 / (|θ_a - θ_b| + eps), then re-normalised so mean weight stays ~1.
+    # Off by default; does not change labels, only sample weights.
+    bt_gap_weighting: bool = False
+    bt_gap_eps: float = 0.1
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> "TrainConfig":
@@ -145,6 +156,7 @@ class PairDataset(Dataset):
         targets: dict[int, float] | None = None,
         target_weight: float = 1.0,
         heavy_indices: set[int] | None = None,
+        gap_weights: dict[int, float] | None = None,
     ):
         self.rows = matchups
         self.faces = faces
@@ -155,6 +167,7 @@ class PairDataset(Dataset):
         # Only these pair_index values get `target_weight` (panel pairs). BT-distill
         # retargets must not inherit the panel upweight.
         self.heavy_indices = heavy_indices or set()
+        self.gap_weights = gap_weights or {}
 
     def __len__(self) -> int:
         return len(self.rows)
@@ -171,6 +184,7 @@ class PairDataset(Dataset):
         # (or a BT soft target written into `targets` by the distill path).
         label = self.targets.get(m.pair_index)
         weight = self.target_weight if m.pair_index in self.heavy_indices else 1.0
+        weight *= self.gap_weights.get(m.pair_index, 1.0)
         if label is None:
             label = 1.0 if m.final_outcome == "A" else 0.0 if m.final_outcome == "B" else 0.5
         return (
@@ -202,6 +216,52 @@ def load_bt_soft_targets(
             continue
         out[m.pair_index] = 1.0 / (1.0 + math.exp(-(ta - tb) / temperature))
     return out
+
+
+def load_bt_gap_weights(
+    rows: list[Matchup],
+    ratings_csv: str | Path,
+    eps: float = 0.1,
+) -> dict[int, float]:
+    """Near-tie upweights: 1 / (|θ_a - θ_b| + eps), mean-normalised to ~1."""
+    import pandas as pd
+
+    if eps <= 0:
+        raise ValueError("bt_gap_eps must be > 0")
+    rank = pd.read_csv(ratings_csv)
+    theta = dict(zip(rank["faceId"], rank["theta"]))
+    raw: dict[int, float] = {}
+    for m in rows:
+        ta, tb = theta.get(m.face_a_id), theta.get(m.face_b_id)
+        if ta is None or tb is None:
+            continue
+        raw[m.pair_index] = 1.0 / (abs(ta - tb) + eps)
+    if not raw:
+        return {}
+    mean = sum(raw.values()) / len(raw)
+    return {k: v / mean for k, v in raw.items()}
+
+
+def pairwise_loss(
+    logits: torch.Tensor,
+    y: torch.Tensor,
+    w: torch.Tensor,
+    loss_type: str,
+    margin: float,
+    bce: nn.Module,
+) -> torch.Tensor:
+    """Weighted mean loss. BCE on logits, or margin hinge on winner/loser score gap."""
+    if loss_type == "bce":
+        per = bce(logits, y)
+    elif loss_type == "margin":
+        # Winner from hard/soft label: A if y >= 0.5 else B.
+        # signed = s_winner - s_loser; hinge when gap < margin.
+        a_wins = y >= 0.5
+        signed = torch.where(a_wins, logits, -logits)
+        per = torch.relu(margin - signed)
+    else:
+        raise ValueError(f"unknown loss_type {loss_type!r}; expected 'bce' or 'margin'")
+    return (per * w).sum() / w.sum()
 
 
 def _apply_confidence_filter(rows: list[Matchup], floor: str) -> list[Matchup]:
@@ -365,6 +425,22 @@ def train(export: Export, cfg: TrainConfig) -> dict:
             f"{len(panel_covered):,} panel pairs kept human, {n_skip:,} missing θ"
         )
 
+    if cfg.loss_type not in ("bce", "margin"):
+        raise ValueError(f"loss_type must be 'bce' or 'margin', got {cfg.loss_type!r}")
+    if cfg.loss_type == "margin" and cfg.margin <= 0:
+        raise ValueError("margin must be > 0 when loss_type=margin")
+
+    gap_weights: dict[int, float] = {}
+    if cfg.bt_gap_weighting:
+        if not cfg.bt_ratings:
+            raise ValueError("bt_gap_weighting requires bt_ratings (vote-blind ranking)")
+        gap_weights = load_bt_gap_weights(train_rows, cfg.bt_ratings, cfg.bt_gap_eps)
+        print(
+            f"BT gap weighting: teacher={cfg.bt_ratings} eps={cfg.bt_gap_eps} "
+            f"-> {len(gap_weights):,}/{len(train_rows):,} train pairs weighted "
+            f"(near-ties upweighted; mean normalised to 1)"
+        )
+
     # Human-grounded validation. These are val-split pairs, so no face here was trained on and
     # no vote here entered the loss — the same leak guard `eval_vs_panel.py` applies, just
     # computed every epoch so it can pick the checkpoint.
@@ -391,6 +467,7 @@ def train(export: Export, cfg: TrainConfig) -> dict:
     train_ds = PairDataset(
         train_rows, faces, export, cfg.backbone, cfg.image_size, cfg.augment,
         targets=targets, target_weight=cfg.panel_weight, heavy_indices=panel_covered,
+        gap_weights=gap_weights,
     )
     val_ds = PairDataset(val_rows, faces, export, cfg.backbone, cfg.image_size, augment=False)
     train_dl = DataLoader(
@@ -422,9 +499,10 @@ def train(export: Export, cfg: TrainConfig) -> dict:
         model.scorer.backbone.eval()
     trainable = [p for p in model.parameters() if p.requires_grad]
     optimizer = torch.optim.AdamW(trainable, lr=cfg.lr, weight_decay=cfg.weight_decay)
-    # reduction="none" so per-sample panel weights can be applied; the weighted mean below
+    # reduction="none" so per-sample panel / gap weights can be applied; the weighted mean
     # keeps train_loss on the same scale as an unweighted run.
-    criterion = nn.BCEWithLogitsLoss(reduction="none")
+    bce = nn.BCEWithLogitsLoss(reduction="none")
+    print(f"loss: {cfg.loss_type}" + (f" (margin={cfg.margin})" if cfg.loss_type == "margin" else ""))
 
     ckpt_dir = Path("checkpoints") / cfg.run_name
     art_dir = Path("artifacts") / cfg.run_name
@@ -447,7 +525,7 @@ def train(export: Export, cfg: TrainConfig) -> dict:
         for a, b, y, w in tqdm(train_dl, desc=f"epoch {epoch}/{cfg.epochs}"):
             a, b, y, w = a.to(device), b.to(device), y.to(device), w.to(device)
             optimizer.zero_grad()
-            loss = (criterion(model(a, b), y) * w).sum() / w.sum()
+            loss = pairwise_loss(model(a, b), y, w, cfg.loss_type, cfg.margin, bce)
             loss.backward()
             optimizer.step()
             running += loss.item() * len(y)

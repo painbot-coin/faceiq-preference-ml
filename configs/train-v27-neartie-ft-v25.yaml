@@ -1,0 +1,56 @@
+# Warm-start from train-v25-panel-ft-v23b (current best: 83.8% bothHeldOut majority).
+#
+# Idea: keep v25's BCE + panel-hard recipe; only change sample weights — upweight
+# near-ties via 1 / (|θ_a - θ_b| + eps) from vote-blind bt-refit-v2-qc (same teacher
+# as distill; do NOT use panel-contaminated rankings for weights). No distill, no
+# margin. Addresses the hypothesis that v25's 8 control-right / model-wrong misses
+# on bothHeldOut need more gradient on hard pairs — though audit shows those 8 are
+# NOT concentrated in small gaps (3/8 with |Δθ|<1, median ≈2.55; 4/8 with |Δθ|≥3),
+# so this is a limited bet on the near-tie slice plus training-set near-ties.
+#
+# Kill if bothHeldOut majority ≤ 83.8% (labs_composite_eval --leakage-split, uniform
+# run-4, panel majority).
+#
+# Run (GPU):
+#   bash scripts/launch_v27_gpu.sh
+#   # or:
+#   python scripts/train.py --config configs/train-v27-neartie-ft-v25.yaml
+#   python scripts/evaluate.py --checkpoint checkpoints/train-v27-neartie-ft-v25/best.pt \
+#       --ratings artifacts/bt-refit-v5-panel/ratings.csv
+#   python scripts/labs_composite_eval.py --run train-v27-neartie-ft-v25 --leakage-split
+
+export_dir: data/exports/cmr1mr0m7000196d57zi3vcgn
+run_name: train-v27-neartie-ft-v25
+
+backbone: arcface_r50
+freeze_backbone: false
+image_size: 112
+batch_size: 32
+epochs: 5
+lr: 0.000005
+weight_decay: 0.0001
+
+val_fraction: 0.2
+split_seed: 42
+num_workers: 4
+skip_ties: true
+augment: true
+
+init_checkpoint: checkpoints/train-v25-panel-ft-v23b/best.pt
+
+# Same BCE as v25 (not margin). No distill — teacher only for gap weights.
+loss_type: bce
+bt_ratings: artifacts/bt-refit-v2-qc/ratings.csv
+bt_gap_weighting: true
+bt_gap_eps: 0.1
+# bt_distill_weight omitted (default 0) — ratings used for |Δθ| weights only
+
+panel_labels:
+  - [labels/panel-pilot/results, labels/panel-pilot/sample-meta.json]
+  - [labels/panel-run-3/results, labels/panel-run-3/sample-meta.json]
+panel_rejects:
+  - artifacts/panel-run-v1/reject-pids.txt
+  - artifacts/panel-run-v3/reject-pids.txt
+panel_min_votes: 4
+panel_prior: 1.0
+panel_hard: true
