@@ -26,6 +26,7 @@ Human level on that draw: **73.2%**. Ranking control on bothHeldOut ≈ **85%**.
 | `ensemble-v25-dino` | 78.6% | 112 | 84.8% (−6.2) | **killed** |
 | `train-v26-margin-ft-v25` | 79.3% | 111 | 85.6% (−6.3) | **killed** |
 | `train-v27-neartie-ft-v25` | 80.4% | 112 | 84.8% (−4.5) | **killed** |
+| MediaPipe ratio late-fusion (v25 + Δratios) | 82.1% | 112 | — | **killed** (−1.8 vs score-sign) |
 
 \*Labs pooled figure from the team report; not the same leakage stratum.
 
@@ -44,6 +45,8 @@ Human level on that draw: **73.2%**. Ranking control on bothHeldOut ≈ **85%**.
 | Score ensemble v25+DINOv2 (v3) | 78.6% — kill |
 | Margin ranking FT from v25 (v26) | **79.3%** — kill; −4.5 vs v25 bothHeldOut |
 | Near-tie BT-gap weighted BCE FT (v27) | **80.4%** — kill; −3.4 vs v25 bothHeldOut |
+| Placement / readout ablations on v25 | **≤83.9%** — kill as accuracy lever (see below) |
+| MediaPipe frontal-ratio late fusion on v25 | **82.1%** (n=112 score-sign) — kill; 0/8 control-right flips |
 | Global Labs blend | Do not blend |
 
 ### v23b detail
@@ -117,6 +120,30 @@ Warm-start v25 → BCE + near-tie BT-gap weights from vote-blind `bt-refit-v2-qc
 Matches the audit caveat: the 8 control-right misses were not near-tie-concentrated,
 so upweighting |Δθ| did not move Goal A.
 
+## Closed: placement / readout ablations (v25 scores, eval-only)
+
+`labs_composite_eval --leakage-split` picks winners by **placed `/10`** (hard sign vs
+tier-stratified refs, default n=200) — not raw `modelScore` sign. Helper:
+`scripts/placement_readout_ablation.py` →
+`artifacts/train-v25-panel-ft-v23b/placement-readout-ablation.json`.
+
+Uniform run-4, panel majority, bothHeldOut:
+
+| Readout | bothHeldOut | n | vs place@200 | Notes |
+|---|---:|---:|---:|---|
+| **place hard refs=200 (ship)** | **83.8%** | 111 | — | production path |
+| place hard refs=50 | 82.4% | 102 | −1.4 | more ties / coarser ladder |
+| place hard refs=100 | 83.3% | 108 | −0.5 | |
+| place hard refs=400 | 83.8% | 111 | +0.0 | identical to 200 |
+| raw `modelScore` sign | 83.9% | 112 | +0.1 | 1 pair skipped as place-tie |
+| z-score within gender → raw | 83.9% | 112 | +0.1 | noop (affine preserves signs) |
+| soft-margin place T∈{0.5,1,2} @200 | 83.9% | 112 | +0.1 | same picks as raw |
+| soft T=1 + z-score @200 | 83.9% | 112 | +0.1 | same |
+
+**Kill as an accuracy lever.** Nothing clears a ≥+2 pt bar on n≈110; soft-margin and
+raw only recover the single placement-tie pair (+0.1). Keep hard place @200 for the
+product `/10` path (consult-a still stands); do not chase readout knobs for Goal A.
+
 ## Next
 Still ~1.8 pts behind ranking control (v25 remains ship baseline).
 
@@ -128,11 +155,32 @@ Still ~1.8 pts behind ranking control (v25 remains ship baseline).
 3. **`train-v27-neartie-ft-v25`** — **killed** (bothHeldOut 80.4% / n=112 vs v25 83.8%;
    control 84.8%). Near-tie weighting confirmed live (30,599/33,449 train pairs) but
    did not help held-out majority.
+4. **Placement / readout tightening** — **killed** as Goal A lever (table above). Ship
+   readout unchanged: hard place, 200 tier-stratified refs.
+5. **Harsh data-lab fusion — Option 2 slice (done 2026-08-12)** — miss × feature cross →
+   `artifacts/train-v25-panel-ft-v23b/bothHeldOut-miss-feature-cross.{json,csv}` + brief
+   [`harsh-data-lab-fusion-brief.md`](./harsh-data-lab-fusion-brief.md).
+   Photo QC **not** enriched on the 8 control-right misses; ethnicity mismatch 6/8
+   descriptive only — **do not** ship demographic late-fusion.
+6. **Option 1 late-fusion — self-serve MediaPipe (done 2026-08-13)** — extracted 6
+   frontal ratios for 2,998/3,000 cohort faces from export photos
+   (`scripts/extract_frontal_ratios.py` → `artifacts/fusion-landmarks-v1/`). Logistic
+   head on `[s_a−s_b, Δratios]`, train=5,942 panel pairs with **no** held-out faces,
+   eval=uniform run-4 bothHeldOut: **82.1%** (n=112) vs score-sign **83.9%** / place
+   **83.8%** — **KILL**. Flipped **0/8** control-right misses. Reproduce:
+   `python scripts/late_fusion_landmarks.py --run train-v25-panel-ft-v23b`.
 
-Later (fusion bet, not a blocker): Harsh data lab / new feature signals.
+**Recommended next bet:** stop MediaPipe-ratio late fusion. Still want Labs
+`frontLandmarks` (+ Labs-derived ratios / pose) for production parity and a second
+schema check — but do **not** expect the same recipe to clear the yardstick unless
+Labs geometry is materially richer (pose, perspective, anatomically curated ratios).
+Next comparator lever is **not** another pixel-only loss FT; prefer a distinct path
+(e.g. architecture / training objective rethink, or wait on Labs schema for a
+targeted re-try) rather than fusion churn.
 
 Do **not** re-open gap-routing, head-only distill, R100, ResNet/DINOv2 score ensembles,
-margin-loss FT, or near-tie BT-gap weighted BCE FT from v25.
+margin-loss FT, near-tie BT-gap weighted BCE FT, placement/readout knobs,
+ethnicity/QC-flag fusion, or MediaPipe-ratio late fusion for accuracy.
 
 ## Report line for the team
 
@@ -142,4 +190,9 @@ comparator train-v25-panel-ft-v23b: bothHeldOut majority = 83.8% (n=111, uniform
 train-v26-margin-ft-v25: 79.3% (n=111) vs control 85.6% (−6.3) — killed (≤83.8%)
 train-v27-neartie-ft-v25: 80.4% (n=112) vs control 84.8% (−4.5) — killed (≤83.8%)
 score ensembles v25+{v1,v4,dino}: 77.8% / 81.7% / 78.6% — all killed (hurt held-out)
+placement/readout ablations on v25: raw/soft ≤83.9% (n=112); refs 50/100/400 ≤83.8%
+  — killed as accuracy lever; keep hard place@200 for /10 product path
+harsh fusion Option 2: miss×feature cross shipped (attrs/QC thin)
+Option 1 self-serve MediaPipe ratios: bothHeldOut 82.1% (n=112) vs score-sign 83.9%
+  — killed; 0/8 control-right flips; still want Labs frontLandmarks for prod parity
 ```
